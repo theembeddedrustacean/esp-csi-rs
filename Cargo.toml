@@ -1,0 +1,172 @@
+[package]
+name = "esp-csi-rs"
+version = "0.1.0"
+edition = "2021"
+authors = ["Omar Hiari"]
+description = "ESP CSI Driver for Rust"
+keywords = ["embedded", "esp32", "esp32c3", "esp32c6", "esp32s3", "wifi", "csi"]
+categories = ["embedded", "embedded::driver", "embedded::device"]
+readme = "README.md"
+homepage = "https://blog.theembeddedrustacean.com/"
+repository = "https://github.com/theembeddedrustacean/esp-csi-rs"
+license = "MIT OR Apache-2.0"
+exclude = ["target/debug/*", "assets/*"]
+
+[lib]
+path = "src/lib/lib.rs"
+
+[features]
+#! ⚠️ At minimum you are required to choose only ONE of the device options. Also you should activate either the defmt or println feature for console printing.
+
+default = ["no-std", "println"]
+## Build without the standard library.
+no-std = []
+## Enable logging via defmt.
+defmt = [
+    "dep:defmt",
+    "dep:defmt-rtt",
+    "esp-hal/defmt",
+    "esp-wifi/defmt",
+    "esp-backtrace/defmt",
+    "embassy-executor/defmt",
+    "esp-println/defmt-espflash",
+]
+## Enable logging via `println!()` instead of defmt.
+println = ["esp-backtrace/println"]
+
+# jtag = ["esp-println/jtag-serial"] # C3, C6, H2, P4, and S3 only!
+
+## Support for the ESP32
+esp32 = [
+    "esp-backtrace/esp32",
+    "esp-hal/esp32",
+    "esp-println/esp32",
+    "esp-println/auto",
+    "esp-println/critical-section",
+    "esp-wifi/esp32",
+    "esp-wifi/csi",
+    "esp-wifi/sniffer",
+    "esp-hal-embassy/esp32",
+]
+
+## Support for the ESP32-C2
+esp32c2 = [
+    "esp-backtrace/esp32c2",
+    "esp-backtrace/println",
+    "esp-hal/esp32c2",
+    "esp-println/esp32c2",
+    "esp-println/auto",
+    "esp-println/critical-section",
+    "esp-wifi/esp32c2",
+    "esp-wifi/csi",
+    "esp-wifi/sniffer",
+    "esp-hal-embassy/esp32c2",
+]
+
+## Support for the ESP32-C3
+esp32c3 = [
+    "esp-hal/esp32c3",
+    "esp-backtrace/esp32c3",
+    "esp-wifi/esp32c3",
+    "esp-wifi/csi",
+    "esp-wifi/sniffer",
+    "esp-hal-embassy/esp32c3",
+    "esp-println/esp32c3",
+    "esp-println/jtag-serial",
+    "esp-println/critical-section",
+]
+
+## Support for the ESP32-C6 (WiFi 6)
+esp32c6 = [
+    "esp-hal/esp32c6",
+    "esp-backtrace/esp32c6",
+    "esp-wifi/esp32c6",
+    "esp-wifi/csi",
+    "esp-wifi/sniffer",
+    "esp-hal-embassy/esp32c6",
+    "esp-println/esp32c6",
+    "esp-println/jtag-serial",
+    "esp-println/critical-section",
+]
+## Support for the ESP32-S3 (AIoT)
+esp32s3 = [
+    "esp-hal/esp32s3",
+    "esp-backtrace/esp32s3",
+    "esp-wifi/esp32s3",
+    "esp-wifi/csi",
+    "esp-wifi/sniffer",
+    "esp-hal-embassy/esp32s3",
+    "esp-println/esp32s3",
+    "esp-println/jtag-serial",
+    "esp-println/critical-section",
+]
+
+
+[dependencies]
+# Core dependencies
+esp-backtrace = { version = "0.15.0", optional = false, features = [
+    "exception-handler",
+    "panic-handler",
+] }
+esp-hal = { version = "0.23.1", default-features = false, optional = false }
+esp-alloc = { version = "0.6.0", optional = false }
+embedded-io = { version = "0.6.1", optional = false }
+embedded-io-async = { version = "0.6.1", optional = false }
+embassy-net = { version = "0.6.0", optional = false, features = [
+    "tcp",
+    "udp",
+    "dhcpv4",
+    "medium-ethernet",
+    "raw",
+    "dns",
+] }
+esp-wifi = { version = "0.12.0", default-features = false, optional = false, features = [
+    "utils",
+    "wifi",
+    "esp-alloc",
+] }
+heapless = { version = "0.8.0", default-features = false, optional = false }
+smoltcp = { version = "0.12.0", default-features = false, optional = false, features = [
+    "medium-ethernet",
+    "proto-dhcpv4",
+    "proto-ipv4",
+    "socket-dhcpv4",
+    "socket-icmp",
+    "socket-raw",
+    "socket-tcp",
+    "socket-udp",
+] }
+defmt = { version = "1.0.1", optional = true }
+defmt-rtt = { version = "1.0.0", optional = true }
+embassy-executor = { version = "0.7.0", optional = false, features = [
+    "task-arena-size-32768",
+] }
+embassy-time = { version = "0.4.0", optional = false, features = [
+    "generic-queue-8",
+] }
+embassy-sync = { version = "0.6.1", optional = false }
+esp-hal-embassy = { version = "0.6.0", default-features = false, optional = false, features = [
+    "executors",
+] }
+static_cell = { version = "2.1.0", optional = false, features = ["nightly"] }
+critical-section = { version = "1.2.0", optional = false }
+edge-dhcp = { version = "0.5.0", optional = false }
+edge-nal = { version = "0.5.0", optional = false }
+edge-nal-embassy = { version = "0.5.0", optional = false }
+enumset = { version = "1.1.5", optional = false }
+esp-println = { version = "0.13.0", optional = false, default-features = false }
+document-features = "0.2.11"
+
+[profile.dev]
+# Rust debug is too slow.
+# For debug builds always builds with some optimization
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1        # LLVM can perform better optimizations using a single thread
+debug = 2
+debug-assertions = false
+incremental = false
+lto = 'fat'
+opt-level = 's'
+overflow-checks = false
