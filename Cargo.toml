@@ -18,7 +18,7 @@ path = "src/lib/lib.rs"
 [features]
 #! ⚠️ At minimum you are required to choose only ONE of the device options. Also you should activate either the defmt or println feature for console printing.
 
-default = ["no-std", "println"]
+default = ["no-std"]
 ## Build without the standard library.
 no-std = []
 ## Enable logging via defmt.
