@@ -21,10 +21,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Rust toolchain (+esp)
-        run: |
-          cargo install espup
-          espup install
+      - name: Setup temporary toolchain
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Install espup
+        run: cargo install espup
+      
+      - name: Setup esp-rs toolchain
+        run: espup install --toolchain esp --targets riscv32imc-unknown-none-elf --export-file ~/.cargo/env
+      
+      - name: Source toolchain
+        run: source ~/.cargo/env && cargo +esp --version
 
       - name: Clean previous docs
         run: cargo +esp clean --doc
