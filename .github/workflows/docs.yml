@@ -23,7 +23,7 @@ jobs:
 
       - name: Setup Rust toolchain (+esp)
         run: |
-          rustup install espup
+          cargo install espup
           espup install
 
       - name: Clean previous docs
