@@ -23,9 +23,8 @@ jobs:
 
       - name: Setup Rust toolchain (+esp)
         run: |
-          rustup install esp
-          rustup component add rust-src --toolchain esp
-          rustup target add riscv32imc-unknown-none-elf --toolchain esp
+          rustup install espup
+          espup install
 
       - name: Clean previous docs
         run: cargo +esp clean --doc
