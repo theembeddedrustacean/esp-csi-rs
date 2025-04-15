@@ -1,10 +1,20 @@
+# RISC-V toolchain for ESP32
 [toolchain]
-channel = "esp"           # Espressif's Rust toolchain
+channel = "stable"
 components = ["rust-src"]
-
 targets = [
     "riscv32imc-unknown-none-elf",  # ESP32-C2, ESP32-C3
     "riscv32imac-unknown-none-elf", # ESP32-C6, ESP32-H2
-    "xtensa-esp32-none-elf",        # ESP32
-    "xtensa-esp32s3-none-elf",      # ESP32-S3
 ]
+
+# Uncomment to support all architechtures including Xtensa
+# [toolchain]
+# channel = "esp"           # Espressif's Rust toolchain
+# components = ["rust-src"]
+
+# targets = [
+#     "riscv32imc-unknown-none-elf",  # ESP32-C2, ESP32-C3
+#     "riscv32imac-unknown-none-elf", # ESP32-C6, ESP32-H2
+#     "xtensa-esp32-none-elf",        # ESP32
+#     "xtensa-esp32s3-none-elf",      # ESP32-S3
+# ]

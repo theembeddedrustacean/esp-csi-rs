@@ -1,4 +1,3 @@
-
 [alias]
 esp32 = "run --release --features=esp32   --target=xtensa-esp32-none-elf"
 esp32c3 = "run --release --features=esp32c3 --target=riscv32imc-unknown-none-elf"

@@ -1,6 +1,6 @@
 [package]
 name = "esp-csi-rs"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Omar Hiari"]
 description = "ESP CSI Driver for Rust"
@@ -170,3 +170,7 @@ incremental = false
 lto = 'fat'
 opt-level = 's'
 overflow-checks = false
+
+[package.metadata.docs.rs]
+targets = ["riscv32imc-unknown-none-elf"]
+features = ["esp32c3", "println"]
