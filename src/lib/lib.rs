@@ -666,42 +666,9 @@ async fn connection(mut controller: WifiController<'static>) {
                     controller.connect_async().await.unwrap();
                     println!("Connected!");
                 }
+
                 // Set the CSI Configuration and Connect Callback (should be passed to function)
-                #[cfg(not(feature = "esp32c6"))]
-                let csi = CsiConfig {
-                    lltf_en: csi_config.lltf_enabled,
-                    htltf_en: csi_config.htltf_enabled,
-                    stbc_htltf2_en: csi_config.stbc_htltf2_enabled,
-                    ltf_merge_en: csi_config.ltf_merge_enabled,
-                    channel_filter_en: csi_config.channel_filter_enabled,
-                    manu_scale: csi_config.manu_scale,
-                    shift: csi_config.shift,
-                    dump_ack_en: csi_config.dump_ack_en,
-                };
-
-                // CsiConfig {
-                //     // lltf_en: csi_config.lltf_enabled,
-                //     // htltf_en: csi_config.htltf_enabled,
-                //     // stbc_htltf2_en: csi_config.stbc_htltf2_enabled,
-                //     // ltf_merge_en: csi_config.ltf_merge_enabled,
-                //     // channel_filter_en: csi_config.channel_filter_enabled,
-                // };
-
-                #[cfg(feature = "esp32c6")]
-                let csi = CsiConfig {
-                    enable: csi_config.enable,
-                    acquire_csi_legacy: csi_config.acquire_csi_legacy,
-                    acquire_csi_ht20: csi_config.acquire_csi_ht20,
-                    acquire_csi_ht40: csi_config.acquire_csi_ht40,
-                    acquire_csi_su: csi_config.acquire_csi_su,
-                    acquire_csi_mu: csi_config.acquire_csi_mu,
-                    acquire_csi_dcm: csi_config.acquire_csi_dcm,
-                    acquire_csi_beamformed: csi_config.acquire_csi_beamformed,
-                    acquire_csi_he_stbc: csi_config.acquire_csi_he_stbc,
-                    val_scale_cfg: csi_config.val_scale_cfg,
-                    dump_ack_en: csi_config.dump_ack_en,
-                    reserved: csi_config.reserved,
-                };
+                let csi = build_csi_config(csi_config.clone());
 
                 // Create default for date time
                 let mut date_time = &DateTime {
@@ -825,52 +792,7 @@ async fn connection(mut controller: WifiController<'static>) {
                             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
                         );
                         println!("rssi: {}", rssi);
-                        println!("rate: {}", rx_ctrl.rate());
-                        println!("noise floor: {}", rx_ctrl.noise_floor());
-                        println!("channel: {}", rx_ctrl.channel());
-                        println!("timestamp: {}", rx_ctrl.timestamp());
-                        println!("sig len: {}", rx_ctrl.sig_len());
-                        println!("rx state: {}", rx_ctrl.rx_state());
-
-                        #[cfg(not(feature = "esp32c6"))]
-                        {
-                            println!("secondary channel: {}", rx_ctrl.secondary_channel());
-                            println!("sgi: {}", rx_ctrl.sgi());
-                            println!("ant: {}", rx_ctrl.ant());
-                            println!("ampdu cnt: {}", rx_ctrl.ampdu_cnt());
-                            println!("sig_mode: {}", rx_ctrl.sig_mode());
-                            println!("mcs: {}", rx_ctrl.mcs());
-                            println!("cwb: {}", rx_ctrl.cwb());
-                            println!("smoothing: {}", rx_ctrl.smoothing());
-                            println!("not sounding: {}", rx_ctrl.not_sounding());
-                            println!("aggregation: {}", rx_ctrl.aggregation());
-                            println!("stbc: {}", rx_ctrl.stbc());
-                            println!("fec coding: {}", rx_ctrl.fec_coding());
-                        }
-
-                        #[cfg(feature = "esp32c6")]
-                        {
-                            println!("dump len: {}", rx_ctrl.dump_len());
-                            println!("he sigb len: {}", rx_ctrl.he_sigb_len());
-                            println!("cur single mpdu: {}", rx_ctrl.cur_single_mpdu());
-                            println!("cur bb format: {}", rx_ctrl.cur_bb_format());
-                            println!(
-                                "rx channel estimate info vld: {}",
-                                rx_ctrl.rx_channel_estimate_info_vld()
-                            );
-                            println!(
-                                "rx channel estimate len: {}",
-                                rx_ctrl.rx_channel_estimate_len()
-                            );
-                            println!("second: {}", rx_ctrl.second());
-                            println!("is group: {}", rx_ctrl.is_group());
-                            println!("rxend state: {}", rx_ctrl.rxend_state());
-                            println!("rxmatch3: {}", rx_ctrl.rxmatch3());
-                            println!("rxmatch2: {}", rx_ctrl.rxmatch2());
-                            println!("rxmatch1: {}", rx_ctrl.rxmatch1());
-                            println!("rxmatch0: {}", rx_ctrl.rxmatch0());
-                        }
-
+                        print_csi_metadata(info);
                         println!("data length: {}", csi_data_len);
                         println!("csi raw data:");
                         #[cfg(feature = "defmt")]
@@ -1277,4 +1199,89 @@ fn days_in_month(year: u64, month: u64) -> u64 {
         12 => 31,
         _ => 0,
     }
+}
+
+#[cfg(feature = "esp32c6")]
+fn build_csi_config(csi_config: CSIConfig) -> CsiConfig {
+    CsiConfig {
+        enable: csi_config.enable,
+        acquire_csi_legacy: csi_config.acquire_csi_legacy,
+        acquire_csi_ht20: csi_config.acquire_csi_ht20,
+        acquire_csi_ht40: csi_config.acquire_csi_ht40,
+        acquire_csi_su: csi_config.acquire_csi_su,
+        acquire_csi_mu: csi_config.acquire_csi_mu,
+        acquire_csi_dcm: csi_config.acquire_csi_dcm,
+        acquire_csi_beamformed: csi_config.acquire_csi_beamformed,
+        acquire_csi_he_stbc: csi_config.acquire_csi_he_stbc,
+        val_scale_cfg: csi_config.val_scale_cfg,
+        dump_ack_en: csi_config.dump_ack_en,
+        reserved: csi_config.reserved,
+    }
+}
+
+#[cfg(not(feature = "esp32c6"))]
+fn build_csi_config(csi_config: CSIConfig) -> CsiConfig {
+    CsiConfig {
+        lltf_en: csi_config.lltf_enabled,
+        htltf_en: csi_config.htltf_enabled,
+        stbc_htltf2_en: csi_config.stbc_htltf2_enabled,
+        ltf_merge_en: csi_config.ltf_merge_enabled,
+        channel_filter_en: csi_config.channel_filter_enabled,
+        manu_scale: csi_config.manu_scale,
+        shift: csi_config.shift,
+        dump_ack_en: csi_config.dump_ack_en,
+    }
+}
+
+#[cfg(not(feature = "esp32c6"))]
+fn print_csi_metadata(info: esp_wifi::wifi::wifi_csi_info_t) {
+    let rx_ctrl = info.rx_ctrl;
+    println!("rate: {}", rx_ctrl.rate());
+    println!("noise floor: {}", rx_ctrl.noise_floor());
+    println!("channel: {}", rx_ctrl.channel());
+    println!("timestamp: {}", rx_ctrl.timestamp());
+    println!("sig len: {}", rx_ctrl.sig_len());
+    println!("rx state: {}", rx_ctrl.rx_state());
+    println!("secondary channel: {}", rx_ctrl.secondary_channel());
+    println!("sgi: {}", rx_ctrl.sgi());
+    println!("ant: {}", rx_ctrl.ant());
+    println!("ampdu cnt: {}", rx_ctrl.ampdu_cnt());
+    println!("sig_mode: {}", rx_ctrl.sig_mode());
+    println!("mcs: {}", rx_ctrl.mcs());
+    println!("cwb: {}", rx_ctrl.cwb());
+    println!("smoothing: {}", rx_ctrl.smoothing());
+    println!("not sounding: {}", rx_ctrl.not_sounding());
+    println!("aggregation: {}", rx_ctrl.aggregation());
+    println!("stbc: {}", rx_ctrl.stbc());
+    println!("fec coding: {}", rx_ctrl.fec_coding());
+}
+
+#[cfg(feature = "esp32c6")]
+fn print_csi_metadata(info: esp_wifi::wifi::wifi_csi_info_t) {
+    let rx_ctrl = info.rx_ctrl;
+    println!("rate: {}", rx_ctrl.rate());
+    println!("noise floor: {}", rx_ctrl.noise_floor());
+    println!("channel: {}", rx_ctrl.channel());
+    println!("timestamp: {}", rx_ctrl.timestamp());
+    println!("sig len: {}", rx_ctrl.sig_len());
+    println!("rx state: {}", rx_ctrl.rx_state());
+    println!("dump len: {}", rx_ctrl.dump_len());
+    println!("he sigb len: {}", rx_ctrl.he_sigb_len());
+    println!("cur single mpdu: {}", rx_ctrl.cur_single_mpdu());
+    println!("cur bb format: {}", rx_ctrl.cur_bb_format());
+    println!(
+        "rx channel estimate info vld: {}",
+        rx_ctrl.rx_channel_estimate_info_vld()
+    );
+    println!(
+        "rx channel estimate len: {}",
+        rx_ctrl.rx_channel_estimate_len()
+    );
+    println!("second: {}", rx_ctrl.second());
+    println!("is group: {}", rx_ctrl.is_group());
+    println!("rxend state: {}", rx_ctrl.rxend_state());
+    println!("rxmatch3: {}", rx_ctrl.rxmatch3());
+    println!("rxmatch2: {}", rx_ctrl.rxmatch2());
+    println!("rxmatch1: {}", rx_ctrl.rxmatch1());
+    println!("rxmatch0: {}", rx_ctrl.rxmatch0());
 }

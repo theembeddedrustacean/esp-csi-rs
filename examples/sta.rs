@@ -77,8 +77,8 @@ async fn main(spawner: Spawner) {
     // Network Architechture is Station-Router (enables NTP time collection)
     let csi_collector = CSICollector::new(
         WiFiConfig {
-            ssid: "Connected Motion ".try_into().unwrap(),
-            password: "automotion@123".try_into().unwrap(),
+            ssid: "SSID".try_into().unwrap(),
+            password: "PASSWORD".try_into().unwrap(),
             ..Default::default()
         },
         esp_csi_rs::WiFiMode::Station,
