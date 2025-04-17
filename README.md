@@ -3,7 +3,10 @@
 A Rust crate for collecting **Channel State Information (CSI)** on **ESP32** series devices using the `no-std` embedded framework.
 
 [![crates.io](https://img.shields.io/crates/v/esp_csi_rs.svg)](https://crates.io/crates/esp_csi_rs)
-[![docs.rs](https://docs.rs/esp_csi_rs/badge.svg)](https://docs.rs/esp_csi_rs)
+[![docs.rs](https://docs.rs/esp-csi-rs/badge.svg)](https://docs.rs/esp-csi-rs)
+
+
+> ‼️ **Command Line Interface (CLI) Option**: If you'd like to extract CSI without having to code your own application, there is the CLI wrapper that was created for that purpose. The CLI also gives access to all the features available in this crate. Check out the [`esp-csi-cli-rs`](https://github.com/theembeddedrustacean/esp-csi-cli-rs) repository where you can flash a pre-built binary. This allows you to interact with your board/device immediately wihtout the need to code your own application.
 
 
 ## Overview
@@ -28,9 +31,6 @@ With exception to the ESP32 and the ESP32-C2, `esp-csi-rs` leverages the `USB-JT
 ### ✅ Traffic Generation
 When setting up a CSI collection system, dummy traffic on the network is needed to exchange packets that encapsulate the CSI data. `esp-csi-rs` in turn allows you to generate either ICMP (simple ping) or UDP traffic. The crate also allows you to control the intervals at which traffic is generated. ICMP is lighter weight, however, does not carry any application data. UDP allows for the transfer of application data if needed. However, this is a feature not enabled yet. 
 
-### ✅ Command Line Interface (CLI)
-If you are not interested in coding your own application, there is the CLI option that allows you to use this crate without coding. Check out the `esp-csi-cli-rs` repository where you can generate an flash a binary. This allows you to interact with your board/device rather than coding an application.
-
 ### ✅ NTP Timestamp
 In architechtres involving a connection to a commercial router with internet access,the ESP device synchronizes with an NTP time server. Afterward, the acquired timestamp is associated with every recieved CSI packet.
 
@@ -42,8 +42,12 @@ In architechtres involving a connection to a commercial router with internet acc
 3. <span style="color:red">***AccessPointStation***</span>: This setup requires the use of at least two ESP devices, one configured as a Station and one as an Access Point. The station sends traffic to the access point to acquire CSI data. This architechure is also expandable where additional stations can be introduces to connect to the central Access point. 
 4. <span style="color:red">***RouterAccessPointStation***</span>:This setup requires the use of at least two ESP devices, one configured as a Station and one as an Access Point + Station. The ESP Access Point + Station connects to a commercial router for internet access while simultaneously providing the ability for stations to connect to it for CSI data. This architechure is also expandable where additional stations can be introduces to connect to the central Access Point + Station. 
 
+<div align="center">
+
 ![Network Architechtures 1](/assets/NetArch1.png)
 ![Network Architechtures 2](/assets/NetArch2.png)
+
+</div>
 
 ## Getting Started
 
