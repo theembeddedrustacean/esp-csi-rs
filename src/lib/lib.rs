@@ -266,12 +266,16 @@ impl CSICollector {
             WiFiMode::AccessPoint => {
                 // Capture SSID and Password from provided configuration
                 let ap_ssid = self.wifi_config.ap_ssid.clone();
-                let ap_password = self.wifi_config.ap_password.clone();
+
+                // AP Configuration with a password is causing a WiFi configuration Error
+                // Probably because an authentication method is not set
+                // left as placeholder for future use
+                // let ap_password = self.wifi_config.ap_password.clone();
 
                 // Access Point Configuration
                 let ap_config = Configuration::AccessPoint(AccessPointConfiguration {
                     ssid: ap_ssid.try_into().unwrap(),
-                    password: ap_password.try_into().unwrap(),
+                    // password: ap_password.try_into().unwrap(),
                     ..Default::default()
                 });
 
@@ -281,7 +285,7 @@ impl CSICollector {
             WiFiMode::AccessPointStation => {
                 // Capture Access Point SSID and Password from provided configuration
                 let ap_ssid = self.wifi_config.ap_ssid.clone();
-                let ap_password = self.wifi_config.ap_password.clone();
+                // let ap_password = self.wifi_config.ap_password.clone();
 
                 // Capture Station SSID and Password from provided configuration
                 let ssid = self.wifi_config.ssid.clone();
@@ -297,7 +301,7 @@ impl CSICollector {
                     },
                     AccessPointConfiguration {
                         ssid: ap_ssid.try_into().unwrap(),
-                        password: ap_password.try_into().unwrap(),
+                        // password: ap_password.try_into().unwrap(),
                         ..Default::default()
                     },
                 );
@@ -643,20 +647,21 @@ async fn connection(mut controller: WifiController<'static>) {
                     // Get the controller configuration
                     let config = CONTROLLER_CONFIG.lock(|c| c.borrow().as_ref().unwrap().clone());
                     // Set the controller configuration
-                    // controller.set_configuration(&config).unwrap();
                     match controller.set_configuration(&config) {
                         Ok(_) => {
                             println!("WiFi Configuration Set: {:?}", config);
                         }
                         Err(_) => {
                             println!("WiFi Configuration Error");
+                            // For Debug only
+                            println!("Error Config: {:?}", config);
                         }
                     }
                 }
                 // Start WiFi
-                println!("Starting wifi");
+                println!("Starting WiFi");
                 controller.start_async().await.unwrap();
-                println!("Wifi started!");
+                println!("Wifi Started!");
 
                 // Check if Station mode is configured to establish a connection
                 if matches!(wifi_mode, WiFiMode::Station | WiFiMode::AccessPointStation) {
