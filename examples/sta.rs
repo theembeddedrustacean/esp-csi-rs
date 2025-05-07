@@ -13,12 +13,11 @@
 #![no_std]
 #![no_main]
 
+use embassy_executor::Spawner;
 use esp_csi_rs::{
     config::{CSIConfig, TrafficConfig, TrafficType, WiFiConfig},
     CSICollector, NetworkArchitechture,
 };
-// use defmt::println;
-use embassy_executor::Spawner;
 use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
 use esp_println as _;
@@ -44,7 +43,7 @@ async fn main(spawner: Spawner) {
     let peripherals = esp_hal::init(config);
 
     // Allocate some heap space
-    esp_alloc::heap_allocator!(72 * 1024);
+    esp_alloc::heap_allocator!(size: 72 * 1024);
 
     println!("Embassy Init");
     // Initialize Embassy
@@ -77,8 +76,8 @@ async fn main(spawner: Spawner) {
     // Network Architechture is Station-Router (enables NTP time collection)
     let csi_collector = CSICollector::new(
         WiFiConfig {
-            ssid: "SSID".try_into().unwrap(),
-            password: "PASSWORD".try_into().unwrap(),
+            ssid: "esp".try_into().unwrap(),
+            password: "12345678".try_into().unwrap(),
             ..Default::default()
         },
         esp_csi_rs::WiFiMode::Station,

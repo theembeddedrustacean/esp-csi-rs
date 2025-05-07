@@ -85,6 +85,7 @@
 #![no_std]
 
 use core::cell::RefCell;
+use core::sync::atomic::AtomicBool;
 use embassy_executor::Spawner;
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 
@@ -109,8 +110,8 @@ use esp_backtrace as _;
 use esp_hal::peripherals::WIFI;
 use esp_wifi::{
     wifi::{
-        AccessPointConfiguration, ClientConfiguration, Configuration, CsiConfig, WifiApDevice,
-        WifiController, WifiDevice, WifiEvent, WifiStaDevice, WifiState,
+        AccessPointConfiguration, ClientConfiguration, Configuration, CsiConfig, WifiController,
+        WifiDevice, WifiEvent, WifiState,
     },
     EspWifiController,
 };
@@ -146,6 +147,7 @@ const NTP_PORT: u16 = 123;
 
 static DATE_TIME: OnceLock<DateTime> = OnceLock::new();
 static START_COLLECTION: Signal<CriticalSectionRawMutex, u64> = Signal::new();
+static DATE_TIME_VALID: AtomicBool = AtomicBool::new(false);
 // static START_TRAFFIC_GEN: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 static CONTROLLER_CONFIG: Mutex<CriticalSectionRawMutex, RefCell<Option<Configuration>>> =
@@ -266,16 +268,19 @@ impl CSICollector {
             WiFiMode::AccessPoint => {
                 // Capture SSID and Password from provided configuration
                 let ap_ssid = self.wifi_config.ap_ssid.clone();
-
-                // AP Configuration with a password is causing a WiFi configuration Error
-                // Probably because an authentication method is not set
-                // left as placeholder for future use
-                // let ap_password = self.wifi_config.ap_password.clone();
+                let ap_password = self.wifi_config.ap_password.clone();
+                let channel = self.wifi_config.channel.clone();
+                let max_connections = self.wifi_config.max_connections.clone();
+                let hide_ssid = self.wifi_config.ssid_hidden.clone();
 
                 // Access Point Configuration
                 let ap_config = Configuration::AccessPoint(AccessPointConfiguration {
                     ssid: ap_ssid.try_into().unwrap(),
-                    // password: ap_password.try_into().unwrap(),
+                    auth_method: esp_wifi::wifi::AuthMethod::WPA2Personal,
+                    password: ap_password.try_into().unwrap(),
+                    max_connections: max_connections,
+                    channel: channel,
+                    ssid_hidden: hide_ssid,
                     ..Default::default()
                 });
 
@@ -285,7 +290,10 @@ impl CSICollector {
             WiFiMode::AccessPointStation => {
                 // Capture Access Point SSID and Password from provided configuration
                 let ap_ssid = self.wifi_config.ap_ssid.clone();
-                // let ap_password = self.wifi_config.ap_password.clone();
+                let ap_password = self.wifi_config.ap_password.clone();
+                let channel = self.wifi_config.channel.clone();
+                let max_connections = self.wifi_config.max_connections.clone();
+                let hide_ssid = self.wifi_config.ssid_hidden.clone();
 
                 // Capture Station SSID and Password from provided configuration
                 let ssid = self.wifi_config.ssid.clone();
@@ -297,11 +305,16 @@ impl CSICollector {
                         ssid: ssid.try_into().unwrap(),
                         password: password.try_into().unwrap(),
                         channel: Some(self.wifi_config.channel),
+                        auth_method: esp_wifi::wifi::AuthMethod::WPA2Personal,
                         ..Default::default()
                     },
                     AccessPointConfiguration {
                         ssid: ap_ssid.try_into().unwrap(),
-                        // password: ap_password.try_into().unwrap(),
+                        auth_method: esp_wifi::wifi::AuthMethod::WPA2Personal,
+                        password: ap_password.try_into().unwrap(),
+                        max_connections: max_connections,
+                        channel: channel,
+                        ssid_hidden: hide_ssid,
                         ..Default::default()
                     },
                 );
@@ -319,6 +332,7 @@ impl CSICollector {
                     ssid: ssid.try_into().unwrap(),
                     password: password.try_into().unwrap(),
                     channel: Some(self.wifi_config.channel),
+                    auth_method: esp_wifi::wifi::AuthMethod::WPA2Personal,
                     ..Default::default()
                 });
 
@@ -371,6 +385,8 @@ impl CSICollector {
         wifi_hw: &'static EspWifiController<'static>,
         seed: u64,
         spawner: &Spawner,
+        // Placeholder for future use to hold & signal captured CSI data
+        // csi_buffer: Option<Signal<CriticalSectionRawMutex, Vec<i8, 612>>>,
     ) -> Result<&'static EspWifiController<'static>> {
         // Validate configuration
         self.validate()?;
@@ -382,8 +398,7 @@ impl CSICollector {
         match self.op_mode {
             WiFiMode::AccessPoint => {
                 // Create WiFi Interface and Controller Instances
-                let (wifi_interface, controller) =
-                    esp_wifi::wifi::new_with_mode(init, wifi, WifiApDevice).unwrap();
+                let (controller, wifi_interface) = esp_wifi::wifi::new(init, wifi).unwrap();
 
                 // Create gateway IP address instance
                 // This config doesnt get an IP address from router but runs DHCP server
@@ -400,32 +415,33 @@ impl CSICollector {
 
                 // Create Network Stack
                 let (ap_stack, ap_runner) = embassy_net::new(
-                    wifi_interface,
+                    wifi_interface.ap,
                     ap_ip_config,
                     mk_static!(StackResources<3>, StackResources::<3>::new()),
                     seed,
                 );
 
-                // Spawn controller, runner, and DHCP server tasks
-                spawner.spawn(connection(controller)).ok();
-                spawner.spawn(ap_net_task(ap_runner)).ok();
-                spawner.spawn(run_dhcp(ap_stack, gw_ip_addr_str)).ok();
+                let sniffer = controller.take_sniffer().unwrap();
+                sniffer.set_promiscuous_mode(false).unwrap();
 
-                // Code goes here for any UDP messaging future support.
+                // Spawn controller, runner, and DHCP server tasks
+                spawner.spawn(net_task(ap_runner)).ok();
+                spawner.spawn(run_dhcp(ap_stack, gw_ip_addr_str)).ok();
+                spawner.spawn(connection(controller)).ok();
+                // spawner.spawn(ap_stack_task(ap_stack)).ok();
             }
 
             // Station Mode
             WiFiMode::Station => {
                 // Create WiFi Interface and Controller Instances
-                let (wifi_interface, controller) =
-                    esp_wifi::wifi::new_with_mode(&init, wifi, WifiStaDevice).unwrap();
+                let (controller, wifi_interface) = esp_wifi::wifi::new(&init, wifi).unwrap();
 
                 // Configure Station DHCP Client
                 let sta_config = embassy_net::Config::dhcpv4(Default::default());
 
                 // Create Network Stack
                 let (sta_stack, sta_runner) = embassy_net::new(
-                    wifi_interface,
+                    wifi_interface.sta,
                     sta_config,
                     mk_static!(StackResources<3>, StackResources::<3>::new()),
                     seed,
@@ -433,7 +449,7 @@ impl CSICollector {
 
                 // Spawn Connection and Network Stack Polling Tasks
                 spawner.spawn(connection(controller)).ok();
-                spawner.spawn(sta_net_task(sta_runner)).ok();
+                spawner.spawn(net_task(sta_runner)).ok();
                 spawner
                     .spawn(sta_stack_task(
                         sta_stack,
@@ -449,8 +465,7 @@ impl CSICollector {
                 // Gets IP address from router and also runs DHCP server
 
                 // Create AP/STA Interface
-                let (wifi_ap_interface, wifi_sta_interface, controller) =
-                    esp_wifi::wifi::new_ap_sta(&init, wifi).unwrap();
+                let (controller, wifi_interface) = esp_wifi::wifi::new(&init, wifi).unwrap();
 
                 // IP Configuration
 
@@ -472,13 +487,13 @@ impl CSICollector {
 
                 // Init network stacks
                 let (ap_stack, ap_runner) = embassy_net::new(
-                    wifi_ap_interface,
+                    wifi_interface.ap,
                     ap_ip_config,
                     mk_static!(StackResources<3>, StackResources::<3>::new()),
                     seed,
                 );
                 let (sta_stack, sta_runner) = embassy_net::new(
-                    wifi_sta_interface,
+                    wifi_interface.sta,
                     sta_ip_config,
                     mk_static!(StackResources<3>, StackResources::<3>::new()),
                     seed,
@@ -486,8 +501,8 @@ impl CSICollector {
 
                 // Spawn controller, runner, and DHCP server tasks
                 spawner.spawn(connection(controller)).ok();
-                spawner.spawn(ap_net_task(ap_runner)).ok();
-                spawner.spawn(sta_net_task(sta_runner)).ok();
+                spawner.spawn(net_task(ap_runner)).ok();
+                spawner.spawn(net_task(sta_runner)).ok();
                 spawner.spawn(run_dhcp(ap_stack, gw_ip_addr_str)).ok();
                 spawner
                     .spawn(sta_stack_task(
@@ -503,14 +518,7 @@ impl CSICollector {
             WiFiMode::Sniffer => {
                 println!("Starting Sniffer");
                 // Create controller instance
-                let controller = match esp_wifi::wifi::new_with_mode(&init, wifi, WifiApDevice) {
-                    Ok((_, controller)) => controller,
-                    Err(_e) => {
-                        return Err(crate::Error::WiFiError(
-                            "Failed to Create Sniffer Controller",
-                        ));
-                    }
-                };
+                let (controller, _) = esp_wifi::wifi::new(&init, wifi).unwrap();
                 // Take sniffer
                 let sniffer = controller.take_sniffer().unwrap();
                 sniffer.set_promiscuous_mode(true).unwrap();
@@ -567,7 +575,7 @@ async fn connection(mut controller: WifiController<'static>) {
 
         // Get configurations from global context
         let csi_config = COLLECTION_CONFIG.lock(|c| c.borrow().as_ref().unwrap().clone());
-        let net_arch = NETWORK_CONFIG.lock(|na| na.borrow().clone());
+        // let net_arch = NETWORK_CONFIG.lock(|na| na.borrow().clone());
         let wifi_mode = OPERATION_MODE.lock(|om| om.borrow().clone());
 
         println!("Starting CSI Collection!");
@@ -581,7 +589,6 @@ async fn connection(mut controller: WifiController<'static>) {
                 | WifiEvent::StaDisconnected
                 | WifiEvent::StaStop
         );
-        let mut current_connections = 0_u32;
         loop {
             match esp_wifi::wifi::wifi_state() {
                 WifiState::ApStarted | WifiState::StaConnected => {
@@ -589,22 +596,15 @@ async fn connection(mut controller: WifiController<'static>) {
                         loop {
                             let mut event = controller.wait_for_events(ap_events, true).await;
                             if event.contains(WifiEvent::ApStaconnected) {
-                                current_connections += 1;
-                                println!(
-                                    "New STA Connected. Number of connections = {}",
-                                    current_connections
-                                );
+                                // current_connections += 1;
+                                println!("New STA Connected");
                             }
                             if event.contains(WifiEvent::ApStadisconnected) {
-                                current_connections -= 1;
-                                println!(
-                                    "STA Disonnected. Number of connections = {}",
-                                    current_connections
-                                );
+                                // current_connections -= 1;
+                                println!("STA Disonnected");
                             }
                             if event.contains(WifiEvent::ApStop) {
                                 // If stopped, try to reconnect
-                                current_connections = 0;
                                 println!("AP connection stopped. Collection halted.");
                                 Timer::after(Duration::from_millis(5000)).await;
                                 break;
@@ -616,7 +616,6 @@ async fn connection(mut controller: WifiController<'static>) {
                             }
                             if event.contains(WifiEvent::StaStop) {
                                 // If stopped, try to reconnect
-                                current_connections = 0;
                                 println!("STA connection stopped. Collection halted.");
                                 Timer::after(Duration::from_millis(5000)).await;
                                 break;
@@ -628,8 +627,9 @@ async fn connection(mut controller: WifiController<'static>) {
 
                     // Handle timeout result
                     match connection {
-                        Ok(_) => (),
-
+                        Ok(_) => {
+                            println!("CSI Collection Concluded. Stopping Controller...");
+                        }
                         Err(_) => {
                             println!("CSI Collection Concluded. Stopping Controller...");
                             controller.disconnect_async().await.unwrap();
@@ -666,10 +666,25 @@ async fn connection(mut controller: WifiController<'static>) {
                 // Check if Station mode is configured to establish a connection
                 if matches!(wifi_mode, WiFiMode::Station | WiFiMode::AccessPointStation) {
                     // Connect WiFi
-                    println!("About to connect...");
-                    // Can do repetitive connection loop here
-                    controller.connect_async().await.unwrap();
-                    println!("Connected!");
+                    // Try to connect to the network up to 4 times
+                    for attempt in 1..=3 {
+                        println!("Connecting (attempt {}/{})...", attempt, 3);
+                        match controller.connect_async().await {
+                            Ok(_) => {
+                                println!("Connected!");
+                                break;
+                            }
+                            Err(e) => {
+                                println!("Connection attempt {} failed: {:?}", attempt, e);
+                                if attempt < 3 {
+                                    println!("Trying again...");
+                                    Timer::after(Duration::from_millis(3000)).await;
+                                } else {
+                                    println!("All connection attempts failed. Giving up.");
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Set the CSI Configuration and Connect Callback (should be passed to function)
@@ -682,137 +697,167 @@ async fn connection(mut controller: WifiController<'static>) {
                     captured_secs: 0,
                 };
 
-                // Retreive the time struct from global context if supported
-                if matches!(
-                    net_arch,
-                    NetworkArchitechture::RouterAccessPointStation
-                        | NetworkArchitechture::RouterStation
-                ) {
+                // Retreive the time struct from global context if available
+                if DATE_TIME_VALID.load(core::sync::atomic::Ordering::Relaxed) {
                     date_time = DATE_TIME.get().await;
                 }
 
-                // CSI callback should calculate the time elapsed using Instant now and getting new time
-                controller
-                    .set_csi(csi, |info: esp_wifi::wifi::wifi_csi_info_t| {
-                        let csi_data = info.buf;
-                        let csi_data_len = info.len;
-                        let mac = info.mac;
-                        let rx_ctrl = info.rx_ctrl;
-                        let rssi = if rx_ctrl.rssi() > 127 {
-                            rx_ctrl.rssi() - 256
-                        } else {
-                            rx_ctrl.rssi()
-                        };
+                if !matches!(
+                    wifi_mode,
+                    WiFiMode::AccessPoint | WiFiMode::AccessPointStation
+                ) {
+                    // CSI callback should calculate the time elapsed using Instant now and getting new time
+                    controller
+                        .set_csi(csi, |info: esp_wifi::wifi::wifi_csi_info_t| {
+                            let csi_data = info.buf;
+                            let csi_data_len = info.len;
+                            let mac = info.mac;
+                            let rx_ctrl = info.rx_ctrl;
+                            let rssi = if rx_ctrl.rssi() > 127 {
+                                rx_ctrl.rssi() - 256
+                            } else {
+                                rx_ctrl.rssi()
+                            };
 
-                        // 612 is the maximum possible amount of data bytes that can be recieved
-                        // https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-guides/wifi.html#wi-fi-channel-state-information
+                            // 612 is the maximum possible amount of data bytes that can be recieved
+                            // https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-guides/wifi.html#wi-fi-channel-state-information
 
-                        let mut data_buffer: Vec<i8, 612> = Vec::new();
-                        for data in 0..csi_data_len {
-                            unsafe {
-                                let value = *csi_data.add(data as usize);
-                                data_buffer.push(value).expect("Exceeded maximum capacity");
+                            let mut data_buffer: Vec<i8, 612> = Vec::new();
+                            for data in 0..csi_data_len {
+                                unsafe {
+                                    let value = *csi_data.add(data as usize);
+                                    data_buffer.push(value).expect("Exceeded maximum capacity");
+                                }
                             }
-                        }
 
-                        // CSI Received Packet Radio Metadata Header Value Interpretations for non-ESP32-C6 devices
+                            // CSI Received Packet Radio Metadata Header Value Interpretations for non-ESP32-C6 devices
 
-                        // rssi: Received Signal Strength Indicator(RSSI) of packet. unit: dBm.
-                        // rate: PHY rate encoding of the packet. Only valid for non HT(11bg) packet.
-                        // sig_mode: Protocol of the received packet, 0: non HT(11bg) packet; 1: HT(11n) packet; 3: VHT(11ac) packet.
-                        // mcs: Modulation Coding Scheme. If is HT(11n) packet, shows the modulation, range from 0 to 76(MSC0 ~ MCS76).
-                        // cwb: Channel Bandwidth of the packet. 0: 20MHz; 1: 40MHz.
-                        // smoothing: Set to 1 indicates that channel estimate smoothing is recommended. Set to 0 indicates that only per-carrier independent (unsmoothed) channel estimate is recommended.
-                        // not_sounding: Set to 0 indicates that PPDU is a sounding PPDU. Set to 1 indicates that the PPDU is not a sounding PPDU. Sounding PPDU is used for channel estimation by the request receiver.
-                        // aggregation: Aggregation. 0: MPDU packet; 1: AMPDU packet
-                        // stbc: Space Time Block Code(STBC). 0: non STBC packet; 1: STBC packet.
-                        // fec_coding: Forward Error Correction (FEC). Flag is set for 11n packets which are LDPC.
-                        // sgi: Short Guide Interval (SGI). 0: Long GI; 1: Short GI.
-                        // noise_floor: noise floor of Radio Frequency Module(RF). unit: dBm.
-                        // ampdu_cnt: The number of subframes aggregated in AMPDU.
-                        // channel: Primary channel on which this packet is received.
-                        // secondary_channel: Secondary channel on which this packet is received. 0: none; 1: above; 2: below.
-                        // timestamp: Timestamp. The local time when this packet is received. It is precise only if modem sleep or light sleep is not enabled. The timer is started when controller.start() is returned. unit: microsecond.
-                        // noise_floor: Noise floor of Radio Frequency Module(RF). unit: dBm.
-                        // ant: Antenna number from which this packet is received. 0: WiFi antenna 0; 1: WiFi antenna 1.
-                        // noise_floor: Noise floor of Radio Frequency Module(RF). unit: dBm.
-                        // sig_len: Length of packet including Frame Check Sequence(FCS).
-                        // rx_state: State of the packet. 0: no error; others: error numbers which are not public.
+                            // rssi: Received Signal Strength Indicator(RSSI) of packet. unit: dBm.
+                            // rate: PHY rate encoding of the packet. Only valid for non HT(11bg) packet.
+                            // sig_mode: Protocol of the received packet, 0: non HT(11bg) packet; 1: HT(11n) packet; 3: VHT(11ac) packet.
+                            // mcs: Modulation Coding Scheme. If is HT(11n) packet, shows the modulation, range from 0 to 76(MSC0 ~ MCS76).
+                            // cwb: Channel Bandwidth of the packet. 0: 20MHz; 1: 40MHz.
+                            // smoothing: Set to 1 indicates that channel estimate smoothing is recommended. Set to 0 indicates that only per-carrier independent (unsmoothed) channel estimate is recommended.
+                            // not_sounding: Set to 0 indicates that PPDU is a sounding PPDU. Set to 1 indicates that the PPDU is not a sounding PPDU. Sounding PPDU is used for channel estimation by the request receiver.
+                            // aggregation: Aggregation. 0: MPDU packet; 1: AMPDU packet
+                            // stbc: Space Time Block Code(STBC). 0: non STBC packet; 1: STBC packet.
+                            // fec_coding: Forward Error Correction (FEC). Flag is set for 11n packets which are LDPC.
+                            // sgi: Short Guide Interval (SGI). 0: Long GI; 1: Short GI.
+                            // noise_floor: noise floor of Radio Frequency Module(RF). unit: dBm.
+                            // ampdu_cnt: The number of subframes aggregated in AMPDU.
+                            // channel: Primary channel on which this packet is received.
+                            // secondary_channel: Secondary channel on which this packet is received. 0: none; 1: above; 2: below.
+                            // timestamp: Timestamp. The local time when this packet is received. It is precise only if modem sleep or light sleep is not enabled. The timer is started when controller.start() is returned. unit: microsecond.
+                            // noise_floor: Noise floor of Radio Frequency Module(RF). unit: dBm.
+                            // ant: Antenna number from which this packet is received. 0: WiFi antenna 0; 1: WiFi antenna 1.
+                            // noise_floor: Noise floor of Radio Frequency Module(RF). unit: dBm.
+                            // sig_len: Length of packet including Frame Check Sequence(FCS).
+                            // rx_state: State of the packet. 0: no error; others: error numbers which are not public.
 
-                        // CSI Received Packet Radio Metadata Header Value Interpretations for ESP32-C6 devices
+                            // CSI Received Packet Radio Metadata Header Value Interpretations for ESP32-C6 devices
 
-                        // rssi: Received Signal Strength Indicator (RSSI) of the packet, in dBm.
-                        // rate: PHY rate encoding of the packet. Only valid for non-HT (802.11b/g) packets.
-                        // sig_len: Length of the received packet including the Frame Check Sequence (FCS).
-                        // rx_state: Reception state of the packet: 0 for no error, others indicate error codes.
-                        // dump_len: Length of the dump buffer.
-                        // he_sigb_len: Length of HE-SIG-B field (802.11ax).
-                        // cur_single_mpdu: Indicates if this is a single MPDU.
-                        // cur_bb_format: Current baseband format.
-                        // rx_channel_estimate_info_vld: Channel estimation validity.
-                        // rx_channel_estimate_len: Length of the channel estimation.
-                        // second: Timing information in seconds.
-                        // channel: Primary channel on which the packet is received.
-                        // noise_floor: Noise floor of the Radio Frequency module, in dBm.
-                        // is_group: Indicates if this is a group-addressed frame.
-                        // rxend_state: End state of the packet reception.
-                        // rxmatch3: Indicate whether the reception frame is from interface 3.
-                        // rxmatch2: Indicate whether the reception frame is from interface 2.
-                        // rxmatch1: Indicate whether the reception frame is from interface 1.
-                        // rxmatch0: Indicate whether the reception frame is from interface 0.
+                            // rssi: Received Signal Strength Indicator (RSSI) of the packet, in dBm.
+                            // rate: PHY rate encoding of the packet. Only valid for non-HT (802.11b/g) packets.
+                            // sig_len: Length of the received packet including the Frame Check Sequence (FCS).
+                            // rx_state: Reception state of the packet: 0 for no error, others indicate error codes.
+                            // dump_len: Length of the dump buffer.
+                            // he_sigb_len: Length of HE-SIG-B field (802.11ax).
+                            // cur_single_mpdu: Indicates if this is a single MPDU.
+                            // cur_bb_format: Current baseband format.
+                            // rx_channel_estimate_info_vld: Channel estimation validity.
+                            // rx_channel_estimate_len: Length of the channel estimation.
+                            // second: Timing information in seconds.
+                            // channel: Primary channel on which the packet is received.
+                            // noise_floor: Noise floor of the Radio Frequency module, in dBm.
+                            // is_group: Indicates if this is a group-addressed frame.
+                            // rxend_state: End state of the packet reception.
+                            // rxmatch3: Indicate whether the reception frame is from interface 3.
+                            // rxmatch2: Indicate whether the reception frame is from interface 2.
+                            // rxmatch1: Indicate whether the reception frame is from interface 1.
+                            // rxmatch0: Indicate whether the reception frame is from interface 0.
 
-                        println!("New CSI Data");
+                            println!("New CSI Data");
 
-                        // Calculate Elapsed time here and add offset to date_time then call to calculate new time
-                        // This code should activate only if architechture supports capturing NTP
-                        if matches!(
-                            net_arch,
-                            NetworkArchitechture::RouterAccessPointStation
-                                | NetworkArchitechture::RouterStation
-                        ) {
-                            let elapsed_time = Instant::now().duration_since(date_time.captured_at);
+                            // Calculate Elapsed time here and add offset to date_time then call to calculate new time
+                            // This code should activate only if architechture supports capturing NTP
+                            if DATE_TIME_VALID.load(core::sync::atomic::Ordering::Relaxed) {
+                                let elapsed_time =
+                                    Instant::now().duration_since(date_time.captured_at);
 
-                            // Add seconds and adjust for overflow from milliseconds
-                            let total_time_secs = date_time.captured_secs + elapsed_time.as_secs();
+                                // Add seconds and adjust for overflow from milliseconds
+                                let total_time_secs =
+                                    date_time.captured_secs + elapsed_time.as_secs();
 
-                            // Add milliseconds and adjust if they exceed 1000
-                            let total_millis = date_time.captured_millis + elapsed_time.as_millis();
-                            let extra_secs = total_millis / 1000; // 1000ms = 1 second
-                            let final_millis = total_millis % 1000; // Remainder in milliseconds
+                                // Add milliseconds and adjust if they exceed 1000
+                                let total_millis =
+                                    date_time.captured_millis + elapsed_time.as_millis();
+                                let extra_secs = total_millis / 1000; // 1000ms = 1 second
+                                let final_millis = total_millis % 1000; // Remainder in milliseconds
 
-                            // Add extra seconds from milliseconds overflow to total seconds
-                            let total_time_secs = total_time_secs + extra_secs;
+                                // Add extra seconds from milliseconds overflow to total seconds
+                                let total_time_secs = total_time_secs + extra_secs;
 
-                            // Now call the date-time conversion function
-                            let (year, month, day, hour, minute, second, millis) =
-                                unix_to_date_time(total_time_secs, final_millis);
+                                // Now call the date-time conversion function
+                                let (year, month, day, hour, minute, second, millis) =
+                                    unix_to_date_time(total_time_secs, final_millis);
 
+                                println!(
+                                    "Recieved at {:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+                                    year, month, day, hour, minute, second, millis
+                                );
+                            }
                             println!(
-                                "Recieved at {:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
-                                year, month, day, hour, minute, second, millis
+                                "mac: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+                                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
                             );
-                        }
-                        println!(
-                            "mac: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-                            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-                        );
-                        println!("rssi: {}", rssi);
-                        print_csi_metadata(info);
-                        println!("data length: {}", csi_data_len);
-                        println!("csi raw data:");
-                        #[cfg(feature = "defmt")]
-                        println!("{=[?]}", data_buffer);
-                        #[cfg(feature = "println")]
-                        println!("{:?}", data_buffer);
-                    })
-                    .unwrap();
-                println!("Waiting for CSI data...");
+                            println!("rssi: {}", rssi);
+                            print_csi_metadata(info);
+                            println!("data length: {}", csi_data_len);
+                            println!("csi raw data:");
+                            #[cfg(feature = "defmt")]
+                            println!("{=[?]}", data_buffer);
+                            #[cfg(feature = "println")]
+                            println!("{:?}", data_buffer);
+                        })
+                        .unwrap();
+
+                    println!("Waiting for CSI data...");
+                }
             }
         }
-        // })
-        // .await;
     }
 }
+
+// Placeholder for future use if an AP stack is required to process packets
+// #[embassy_executor::task]
+// async fn ap_stack_task(ap_stack: Stack<'static>) {
+//     let mut rx_buffer = [0; 1024];
+//     let mut tx_buffer = [0; 1024];
+//     let mut rx_meta: [PacketMetadata; 128] = [PacketMetadata::EMPTY; 128];
+//     let mut tx_meta: [PacketMetadata; 128] = [PacketMetadata::EMPTY; 128];
+
+//     let mut socket = UdpSocket::new(
+//         ap_stack,
+//         &mut rx_meta,
+//         &mut rx_buffer,
+//         &mut tx_meta,
+//         &mut tx_buffer,
+//     );
+
+//     println!("Binding");
+
+//     socket.bind(10987).unwrap();
+
+//     let mut buf = [0u8; 512];
+
+//     loop {
+//         // Wait to receive a packet
+//         let (n, sender_endpoint) = socket.recv_from(&mut buf).await.unwrap();
+
+//         println!("Received {} bytes from {:?}", n, sender_endpoint);
+//         println!("Received array: {:?}", buf);
+//     }
+// }
 
 #[embassy_executor::task]
 async fn sta_stack_task(
@@ -825,14 +870,10 @@ async fn sta_stack_task(
     println!("STA Stack Task Running");
 
     // Acquire and store IP information for gateway and client after configuration is up
+
     // Check if link is up
-    loop {
-        if sta_stack.is_link_up() {
-            println!("Link is up!");
-            break;
-        }
-        Timer::after(Duration::from_millis(500)).await;
-    }
+    sta_stack.wait_link_up().await;
+    println!("Link is up!");
 
     // Create instance to store acquired IP information
     let mut ip_info = IpInfo {
@@ -840,13 +881,9 @@ async fn sta_stack_task(
         gateway_address: Ipv4Address::UNSPECIFIED,
     };
 
-    loop {
-        if sta_stack.is_config_up() {
-            println!("Config acquired!");
-            break;
-        }
-        Timer::after(Duration::from_millis(500)).await;
-    }
+    println!("Acquiring config...");
+    sta_stack.wait_config_up().await;
+    println!("Config Acquired");
 
     // Print out acquired IP configuration
     loop {
@@ -866,43 +903,51 @@ async fn sta_stack_task(
     match net_arch {
         NetworkArchitechture::RouterStation | NetworkArchitechture::RouterAccessPointStation => {
             // Get Current SNTP unix time values
-            let (seconds, milliseconds) = get_sntp_time(sta_stack).await.unwrap();
+            match get_sntp_time(sta_stack).await {
+                Ok((seconds, milliseconds)) => {
+                    // Convert captured time to date/time values
+                    let time_capture = unix_to_date_time(seconds.into(), milliseconds);
 
-            // Convert captured time to date/time values
-            let time_capture = unix_to_date_time(seconds.into(), milliseconds);
+                    // Print the time captured for validation
+                    println!(
+                        "Time: {:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+                        time_capture.0,
+                        time_capture.1,
+                        time_capture.2,
+                        time_capture.3,
+                        time_capture.4,
+                        time_capture.5,
+                        time_capture.6
+                    );
 
-            // Print the time captured for validation
-            println!(
-                "Time: {:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
-                time_capture.0,
-                time_capture.1,
-                time_capture.2,
-                time_capture.3,
-                time_capture.4,
-                time_capture.5,
-                time_capture.6
-            );
+                    // Store the captured time instant values to DateTime struct
+                    let time = DateTime {
+                        captured_at: Instant::now(),
+                        captured_secs: seconds as u64,
+                        captured_millis: milliseconds,
+                    };
 
-            // Store the captured time instant values to DateTime struct
-            let time = DateTime {
-                captured_at: Instant::now(),
-                captured_secs: seconds as u64,
-                captured_millis: milliseconds,
-            };
-
-            // Move DateTime struct to Global Context
-            match DATE_TIME.init(time) {
-                Ok(_) => {
-                    println!("Time Captured");
+                    // Move DateTime struct to Global Context
+                    match DATE_TIME.init(time) {
+                        Ok(_) => {
+                            println!("Time Captured");
+                            DATE_TIME_VALID.store(true, core::sync::atomic::Ordering::Relaxed);
+                        }
+                        Err(_) => {
+                            println!("Failed to Capture Time");
+                            DATE_TIME_VALID.store(false, core::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
                 }
                 Err(_) => {
-                    println!("Failed to Capture Time");
+                    println!("Failed to get SNTP time, Proceeding with default.");
+                    DATE_TIME_VALID.store(false, core::sync::atomic::Ordering::Relaxed);
                 }
             }
         }
         NetworkArchitechture::AccessPointStation | NetworkArchitechture::Sniffer => {
             // Do Nothing, No Connection to Internet to Sync Time
-            println!("NTP Time not Captured. Configured Architechture does not Support.");
+            println!("NTP time not captured. Configured architechture does not support.");
         }
     }
 
@@ -927,8 +972,11 @@ async fn sta_stack_task(
 
                 println!("Binding");
 
+                // Bind to a local port
                 socket.bind(10987).unwrap();
 
+                // Send to some unreachable port to trigger response
+                // Using same local port number
                 let endpoint =
                     IpEndpoint::new(embassy_net::IpAddress::Ipv4(ip_info.gateway_address), 10987);
 
@@ -949,7 +997,7 @@ async fn sta_stack_task(
                 let mut rx_meta: [RawPacketMetadata; 1] = [RawPacketMetadata::EMPTY; 1];
                 let mut tx_meta: [RawPacketMetadata; 1] = [RawPacketMetadata::EMPTY; 1];
 
-                let raw_socket = RawSocket::new::<WifiDevice<'_, WifiStaDevice>>(
+                let raw_socket = RawSocket::new::<WifiDevice<'_>>(
                     sta_stack,
                     IpVersion::Ipv4,
                     IpProtocol::Icmp,
@@ -1015,15 +1063,9 @@ async fn sta_stack_task(
     }
 }
 
-#[embassy_executor::task]
-async fn sta_net_task(mut runner: Runner<'static, WifiDevice<'static, WifiStaDevice>>) {
-    println!("STA Network Task Running");
-    runner.run().await
-}
-
-#[embassy_executor::task]
-async fn ap_net_task(mut runner: Runner<'static, WifiDevice<'static, WifiApDevice>>) {
-    println!("AP Network Task Running");
+#[embassy_executor::task(pool_size = 2)]
+async fn net_task(mut runner: Runner<'static, WifiDevice<'static>>) {
+    println!("Network Task Running");
     runner.run().await
 }
 
@@ -1038,7 +1080,7 @@ async fn run_dhcp(stack: Stack<'static>, gw_ip_addr: &'static str) {
     use edge_nal::UdpBind;
     use edge_nal_embassy::{Udp, UdpBuffers};
 
-    let ip = Ipv4Addr::from_str(gw_ip_addr).expect("dhcp task failed to parse gw ip");
+    let ip = Ipv4Addr::from_str(gw_ip_addr).expect("DHCP task failed to parse gateway ip");
 
     let mut buf = [0u8; 1500];
 
@@ -1054,15 +1096,18 @@ async fn run_dhcp(stack: Stack<'static>, gw_ip_addr: &'static str) {
         .await
         .unwrap();
 
+    println!("DHCP Server Running");
+    let mut server = Server::<_, 64>::new_with_et(ip);
     loop {
         _ = io::server::run(
-            &mut Server::<_, 64>::new_with_et(ip),
+            &mut server,
             &ServerOptions::new(ip, Some(&mut gw_buf)),
             &mut bound_socket,
             &mut buf,
         )
         .await
         .inspect_err(|_e| println!("DHCP Server Error"));
+        println!("DHCP Buffer: {:?}", buf);
         Timer::after(Duration::from_millis(500)).await;
     }
 }
@@ -1089,33 +1134,33 @@ async fn get_sntp_time(stack: Stack<'_>) -> Result<(u32, u64)> {
     let mut sntp_packet = [0u8; 48];
     sntp_packet[0] = 0x23; // LI = 0, VN = 4, Mode = 3
 
-    let ntp_server_addrs = stack
+    let Ok(ntp_server_addrs) = stack
         .dns_query(NTP_SERVER, smoltcp::wire::DnsQueryType::A)
         .await
-        .unwrap();
+    else {
+        return Err(error::Error::ConfigError(""));
+    };
 
     // Find the first IPv4 address in the result
-    let ntp_server_addr = ntp_server_addrs
-        .iter()
-        .find_map(|addr| match addr {
-            IpAddress::Ipv4(ip) => Some(*ip), // Return the first IPv4 address
-            _ => None,
-        })
-        .ok_or("No IPv4 address found for SNTP")
-        .unwrap();
+    let Some(ntp_server_addr) = ntp_server_addrs.iter().find_map(|addr| match addr {
+        IpAddress::Ipv4(ip) => Some(*ip), // Return the first IPv4 address
+        _ => None,
+    }) else {
+        return Err(error::Error::ConfigError(""));
+    };
 
-    sntp_socket
+    let Ok(_) = sntp_socket
         .send_to(&sntp_packet, (ntp_server_addr, NTP_PORT))
         .await
-        .map_err(|_| "Send failed")
-        .unwrap();
+    else {
+        return Err(error::Error::ConfigError(""));
+    };
 
     let mut ntp_response = [0_u8; 48];
-    let (len, _) = sntp_socket
-        .recv_from(&mut ntp_response)
-        .await
-        .map_err(|_| "Receive failed")
-        .unwrap();
+    let Ok((len, _)) = sntp_socket.recv_from(&mut ntp_response).await else {
+        println!("Receive failed");
+        return Err(error::Error::ConfigError(""));
+    };
 
     if len < 48 {
         return Err(crate::Error::SystemError("Incomplete NTP response"));

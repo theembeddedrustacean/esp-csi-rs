@@ -20,15 +20,15 @@
 #![no_std]
 #![no_main]
 
-use defmt::println;
 use embassy_executor::Spawner;
 use esp_csi_rs::{
-    config::{CSIConfig, TrafficConfig, TrafficType, WiFiConfig},
+    config::{CSIConfig, TrafficConfig, WiFiConfig},
     CSICollector, NetworkArchitechture,
 };
 use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
 use esp_println as _;
+use esp_println::println;
 use esp_wifi::{init, EspWifiController};
 
 extern crate alloc;
@@ -50,7 +50,7 @@ async fn main(spawner: Spawner) {
     let peripherals = esp_hal::init(config);
 
     // Allocate some heap space
-    esp_alloc::heap_allocator!(72 * 1024);
+    esp_alloc::heap_allocator!(size: 72 * 1024);
 
     // Initialize Embassy
     let timg1 = TimerGroup::new(peripherals.TIMG1);
@@ -80,8 +80,8 @@ async fn main(spawner: Spawner) {
     // Network Architechture is AccessPoint-Station (NTP time collection not possible)
     let csi_collector = CSICollector::new(
         WiFiConfig {
-            ap_ssid: "SSID".try_into().unwrap(),
-            ap_password: "PASSWORD".try_into().unwrap(),
+            ap_ssid: "esp".try_into().unwrap(),
+            ap_password: "12345678".try_into().unwrap(),
             max_connections: 1,
             ssid_hidden: false,
             ..Default::default()
@@ -97,7 +97,7 @@ async fn main(spawner: Spawner) {
     csi_collector.init(wifi, init, seed, &spawner).unwrap();
 
     // Collect CSI for 10 seconds
-    csi_collector.start(10).await;
+    csi_collector.start(5000).await;
 
     loop {}
 }

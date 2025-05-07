@@ -108,8 +108,10 @@ esp-backtrace = { version = "0.15.0", optional = false, features = [
     "exception-handler",
     "panic-handler",
 ] }
-esp-hal = { version = "0.23.1", default-features = false, optional = false }
-esp-alloc = { version = "0.6.0", optional = false }
+esp-hal = { version = "1.0.0-beta.0", default-features = false, optional = false, features = [
+    "unstable",
+] }
+esp-alloc = { version = "0.7.0", optional = false }
 embedded-io = { version = "0.6.1", optional = false }
 embedded-io-async = { version = "0.6.1", optional = false }
 embassy-net = { version = "0.6.0", optional = false, features = [
@@ -120,10 +122,10 @@ embassy-net = { version = "0.6.0", optional = false, features = [
     "raw",
     "dns",
 ] }
-esp-wifi = { version = "0.12.0", default-features = false, optional = false, features = [
-    "utils",
+esp-wifi = { version = "0.13.0", default-features = false, optional = false, features = [
     "wifi",
     "esp-alloc",
+    "builtin-scheduler",
 ] }
 heapless = { version = "0.8.0", default-features = false, optional = false }
 smoltcp = { version = "0.12.0", default-features = false, optional = false, features = [
@@ -145,7 +147,7 @@ embassy-time = { version = "0.4.0", optional = false, features = [
     "generic-queue-8",
 ] }
 embassy-sync = { version = "0.6.1", optional = false }
-esp-hal-embassy = { version = "0.6.0", default-features = false, optional = false, features = [
+esp-hal-embassy = { version = "0.7.0", default-features = false, optional = false, features = [
     "executors",
 ] }
 static_cell = { version = "2.1.0", optional = false, features = ["nightly"] }

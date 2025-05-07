@@ -57,7 +57,7 @@ async fn main(spawner: Spawner) {
     let peripherals = esp_hal::init(config);
 
     // Allocate some heap space
-    esp_alloc::heap_allocator!(72 * 1024);
+    esp_alloc::heap_allocator!(size:72 * 1024);
 
     // Initialize Embassy
     let timg1 = TimerGroup::new(peripherals.TIMG1);
