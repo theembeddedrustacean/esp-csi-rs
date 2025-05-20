@@ -14,6 +14,8 @@
 #![no_main]
 
 use embassy_executor::Spawner;
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, pubsub::Subscriber};
+use embassy_time::{Duration, Timer};
 use esp_csi_rs::{
     config::{CSIConfig, TrafficConfig, TrafficType, WiFiConfig},
     CSICollector, NetworkArchitechture,
@@ -23,6 +25,7 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_println as _;
 use esp_println::println;
 use esp_wifi::{init, EspWifiController};
+use heapless::Vec;
 
 extern crate alloc;
 
@@ -72,29 +75,51 @@ async fn main(spawner: Spawner) {
     // Create a CSI collector configuration
     // Device configured as a Station
     // Traffic is enabled with UDP packets
-    // Traffic (UDP packets) is generated every 1 second
-    // Network Architechture is Station-Router (enables NTP time collection)
+    // Traffic (UDP packets) is generated every 500 milli seconds
+    // Network Architechture is AccessPointStation (no NTP time collection)
     let csi_collector = CSICollector::new(
         WiFiConfig {
-            ssid: "esp".try_into().unwrap(),
-            password: "12345678".try_into().unwrap(),
+            ssid: "Connected Motion ".try_into().unwrap(),
+            password: "automotion@123".try_into().unwrap(),
             ..Default::default()
         },
         esp_csi_rs::WiFiMode::Station,
         CSIConfig::default(),
         TrafficConfig {
-            traffic_type: TrafficType::UDP,
-            traffic_interval_ms: 1000,
+            traffic_type: TrafficType::ICMPPing,
+            traffic_interval_ms: 500,
         },
         true,
-        NetworkArchitechture::RouterStation,
+        NetworkArchitechture::AccessPointStation,
+        None,
+        false,
     );
 
     // Initalize CSI collector
     csi_collector.init(wifi, init, seed, &spawner).unwrap();
 
-    // Collect CSI for 10 seconds
-    csi_collector.start(10).await;
+    // Collect CSI for 5 seconds
+    // let reciever = csi_collector.start(Some(5));
+    // To run indefinely, use the following line instead
+    let csi = csi_collector.start(None);
 
-    loop {}
+    // Optionally spawn a task to process incoming CSI data
+    // collector returns a Subscriber type with a buffer of 612 bytes, Capacity of 1, 2 subscribers, and 2 publishers
+    spawner.spawn(csi_task(csi)).ok();
+
+    loop {
+        Timer::after(Duration::from_secs(1)).await
+    }
+}
+
+#[embassy_executor::task]
+async fn csi_task(
+    mut csi_buffer: Subscriber<'static, CriticalSectionRawMutex, Vec<i8, 612>, 1, 2, 1>,
+) {
+    loop {
+        // Wait for CSI data to be received
+        let csi_data = csi_buffer.next_message().await;
+        // Print the CSI data
+        println!("CSI Data printed from Task: {:?}", csi_data);
+    }
 }

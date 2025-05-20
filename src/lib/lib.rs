@@ -87,6 +87,7 @@
 use core::cell::RefCell;
 use core::sync::atomic::AtomicBool;
 use embassy_executor::Spawner;
+use embassy_sync::pubsub::{PubSubBehavior, PubSubChannel, Subscriber};
 use embassy_time::{with_timeout, Duration, Instant, Timer};
 
 #[cfg(feature = "println")]
@@ -146,7 +147,7 @@ const NTP_SERVER: &str = "pool.ntp.org";
 const NTP_PORT: u16 = 123;
 
 static DATE_TIME: OnceLock<DateTime> = OnceLock::new();
-static START_COLLECTION: Signal<CriticalSectionRawMutex, u64> = Signal::new();
+static START_COLLECTION: Signal<CriticalSectionRawMutex, Option<u64>> = Signal::new();
 static DATE_TIME_VALID: AtomicBool = AtomicBool::new(false);
 // static START_TRAFFIC_GEN: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
@@ -158,6 +159,9 @@ static COLLECTION_CONFIG: Mutex<CriticalSectionRawMutex, RefCell<Option<CSIConfi
     Mutex::new(RefCell::new(None));
 static OPERATION_MODE: Mutex<CriticalSectionRawMutex, RefCell<WiFiMode>> =
     Mutex::new(RefCell::new(WiFiMode::Sniffer));
+static CSI_CHANNEL: PubSubChannel<CriticalSectionRawMutex, Vec<i8, 612>, 1, 2, 1> =
+    PubSubChannel::new();
+static DHCP_COMPLETE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 // Date Time Struct
 #[derive(Debug, Clone)]
@@ -214,6 +218,10 @@ pub struct CSICollector {
     pub traffic_enabled: bool,
     /// Network Architechture Option
     pub net_arch: NetworkArchitechture,
+    /// MAC Address Filter fo CSI Data
+    pub mac_filter: Option<[u8; 6]>,
+    /// Enable CSI Data Printing to Console
+    pub print_csi: bool,
 }
 
 impl CSICollector {
@@ -225,6 +233,8 @@ impl CSICollector {
         traffic_config: TrafficConfig,
         traffic_enabled: bool,
         net_arch: NetworkArchitechture,
+        mac_filter: Option<[u8; 6]>,
+        print_csi: bool,
     ) -> Self {
         Self {
             wifi_config,
@@ -233,6 +243,8 @@ impl CSICollector {
             traffic_config,
             traffic_enabled,
             net_arch,
+            mac_filter,
+            print_csi,
         }
     }
 
@@ -247,11 +259,16 @@ impl CSICollector {
             traffic_config: TrafficConfig::default(),
             traffic_enabled: false,
             net_arch: NetworkArchitechture::Sniffer,
+            mac_filter: None,
+            print_csi: true,
         }
     }
 
     /// Starts CSI Collection
-    pub async fn start(&self, collection_time_secs: u64) {
+    pub fn start(
+        &self,
+        collection_time_secs: Option<u64>,
+    ) -> Subscriber<'static, CriticalSectionRawMutex, Vec<i8, 612>, 1, 2, 1> {
         // In this method everytime the collection starts, the new configurations are loaded and propagated to global context.
         // All settings can be copied from new configuration and loaded to global, without needing to initalize again.
         // Initialization should be restriced to setting up hardware an spawning the network tasks.
@@ -341,10 +358,14 @@ impl CSICollector {
             }
             _ => {}
         }
+        DHCP_COMPLETE.reset();
         // Send signal to connection to start collection
         START_COLLECTION.signal(collection_time_secs);
+        CSI_CHANNEL
+            .subscriber()
+            .expect("Failed to create CSI channel subscriber")
         // Wait for duration interval to finish
-        Timer::after(Duration::from_secs(collection_time_secs)).await;
+        // Timer::after(Duration::from_secs(collection_time_secs)).await;
     }
 
     /// Sets the WiFi configuration for CSI collection
@@ -385,8 +406,6 @@ impl CSICollector {
         wifi_hw: &'static EspWifiController<'static>,
         seed: u64,
         spawner: &Spawner,
-        // Placeholder for future use to hold & signal captured CSI data
-        // csi_buffer: Option<Signal<CriticalSectionRawMutex, Vec<i8, 612>>>,
     ) -> Result<&'static EspWifiController<'static>> {
         // Validate configuration
         self.validate()?;
@@ -421,13 +440,12 @@ impl CSICollector {
                     seed,
                 );
 
-                let sniffer = controller.take_sniffer().unwrap();
-                sniffer.set_promiscuous_mode(false).unwrap();
-
                 // Spawn controller, runner, and DHCP server tasks
                 spawner.spawn(net_task(ap_runner)).ok();
                 spawner.spawn(run_dhcp(ap_stack, gw_ip_addr_str)).ok();
-                spawner.spawn(connection(controller)).ok();
+                spawner
+                    .spawn(connection(controller, self.mac_filter, self.print_csi))
+                    .ok();
                 // spawner.spawn(ap_stack_task(ap_stack)).ok();
             }
 
@@ -448,7 +466,9 @@ impl CSICollector {
                 );
 
                 // Spawn Connection and Network Stack Polling Tasks
-                spawner.spawn(connection(controller)).ok();
+                spawner
+                    .spawn(connection(controller, self.mac_filter, self.print_csi))
+                    .ok();
                 spawner.spawn(net_task(sta_runner)).ok();
                 spawner
                     .spawn(sta_stack_task(
@@ -500,7 +520,9 @@ impl CSICollector {
                 );
 
                 // Spawn controller, runner, and DHCP server tasks
-                spawner.spawn(connection(controller)).ok();
+                spawner
+                    .spawn(connection(controller, self.mac_filter, self.print_csi))
+                    .ok();
                 spawner.spawn(net_task(ap_runner)).ok();
                 spawner.spawn(net_task(sta_runner)).ok();
                 spawner.spawn(run_dhcp(ap_stack, gw_ip_addr_str)).ok();
@@ -524,7 +546,9 @@ impl CSICollector {
                 sniffer.set_promiscuous_mode(true).unwrap();
 
                 // Spawn controller to start sniffing
-                spawner.spawn(connection(controller)).ok();
+                spawner
+                    .spawn(connection(controller, self.mac_filter, self.print_csi))
+                    .ok();
             }
         }
         Ok(init)
@@ -567,21 +591,22 @@ impl CSICollector {
 // Embassy Tasks
 
 #[embassy_executor::task]
-async fn connection(mut controller: WifiController<'static>) {
+async fn connection(
+    mut controller: WifiController<'static>,
+    mac_filter: Option<[u8; 6]>,
+    print_csi_en: bool,
+) {
     loop {
-        // CSI collection is supported for all configurations
-        // Don't start CSI collection until start collection is signalled
+        // Wait for the START_COLLECTION signal
         let run_duration_secs = START_COLLECTION.wait().await;
 
         // Get configurations from global context
         let csi_config = COLLECTION_CONFIG.lock(|c| c.borrow().as_ref().unwrap().clone());
-        // let net_arch = NETWORK_CONFIG.lock(|na| na.borrow().clone());
+        let net_arch = NETWORK_CONFIG.lock(|na| na.borrow().clone());
         let wifi_mode = OPERATION_MODE.lock(|om| om.borrow().clone());
 
         println!("Starting CSI Collection!");
 
-        println!("Starting WiFi Connection...");
-        // let connection = with_timeout(Duration::from_secs(run_duration_secs), async {
         let ap_events = enum_set!(
             WifiEvent::ApStaconnected
                 | WifiEvent::ApStadisconnected
@@ -589,239 +614,173 @@ async fn connection(mut controller: WifiController<'static>) {
                 | WifiEvent::StaDisconnected
                 | WifiEvent::StaStop
         );
+
+        // Inner loop to handle WiFi state
         loop {
             match esp_wifi::wifi::wifi_state() {
                 WifiState::ApStarted | WifiState::StaConnected => {
-                    let connection = with_timeout(Duration::from_secs(run_duration_secs), async {
+                    // For Station or AP+Station modes, ensure DHCP is complete before enabling CSI
+                    if matches!(wifi_mode, WiFiMode::Station | WiFiMode::AccessPointStation) {
+                        println!("Waiting for DHCP to complete...");
+                        match with_timeout(Duration::from_secs(30), DHCP_COMPLETE.wait()).await {
+                            Ok(()) => println!("DHCP complete, enabling CSI collection."),
+                            Err(_) => {
+                                println!("DHCP timed out, skipping CSI collection.");
+                                START_COLLECTION.reset();
+                                break;
+                            }
+                        }
+                    }
+
+                    // Set CSI configuration only when collection is explicitly started
+                    if !matches!(
+                        wifi_mode,
+                        WiFiMode::AccessPoint | WiFiMode::AccessPointStation
+                    ) {
+                        let csi = build_csi_config(csi_config.clone());
+                        let date_time =
+                            if DATE_TIME_VALID.load(core::sync::atomic::Ordering::Relaxed) {
+                                DATE_TIME.get().await
+                            } else {
+                                &DateTime {
+                                    captured_at: Instant::now(),
+                                    captured_millis: 0,
+                                    captured_secs: 0,
+                                }
+                            };
+
+                        println!("Enabling CSI collection");
+                        controller
+                            .set_csi(csi, |info: esp_wifi::wifi::wifi_csi_info_t| {
+                                let csi_data = info.buf;
+                                let csi_data_len = info.len;
+                                let mut data_buffer: Vec<i8, 612> = Vec::new();
+                                for data in 0..csi_data_len {
+                                    unsafe {
+                                        let value = *csi_data.add(data as usize);
+                                        data_buffer.push(value).expect("Exceeded maximum capacity");
+                                    }
+                                }
+                                if mac_filter.is_some() && info.mac != mac_filter.unwrap() {
+                                    return;
+                                }
+                                CSI_CHANNEL.publish_immediate(data_buffer.clone());
+                                if print_csi_en {
+                                    print_csi(info, date_time.clone(), data_buffer, csi_data_len);
+                                }
+                            })
+                            .unwrap();
+                    }
+
+                    let run_loop = async {
                         loop {
                             let mut event = controller.wait_for_events(ap_events, true).await;
                             if event.contains(WifiEvent::ApStaconnected) {
-                                // current_connections += 1;
                                 println!("New STA Connected");
                             }
                             if event.contains(WifiEvent::ApStadisconnected) {
-                                // current_connections -= 1;
-                                println!("STA Disonnected");
+                                println!("STA Disconnected");
                             }
                             if event.contains(WifiEvent::ApStop) {
-                                // If stopped, try to reconnect
                                 println!("AP connection stopped. Collection halted.");
                                 Timer::after(Duration::from_millis(5000)).await;
-                                break;
+                                return Ok::<(), ()>(());
                             }
                             if event.contains(WifiEvent::StaDisconnected) {
                                 println!("STA disconnected");
                                 Timer::after(Duration::from_millis(5000)).await;
-                                break;
+                                return Ok(());
                             }
                             if event.contains(WifiEvent::StaStop) {
-                                // If stopped, try to reconnect
                                 println!("STA connection stopped. Collection halted.");
                                 Timer::after(Duration::from_millis(5000)).await;
-                                break;
+                                return Ok(());
                             }
                             event.clear();
                         }
-                    })
-                    .await;
+                    };
 
-                    // Handle timeout result
-                    match connection {
-                        Ok(_) => {
-                            println!("CSI Collection Concluded. Stopping Controller...");
+                    let should_stop = match run_duration_secs {
+                        Some(duration) => {
+                            let conn_res =
+                                with_timeout(Duration::from_secs(duration), run_loop).await;
+                            match conn_res {
+                                Ok(_) => {
+                                    println!("CSI Collection Concluded. Stopping Controller...");
+                                    true
+                                }
+                                Err(_) => {
+                                    println!("CSI Collection Timed Out. Stopping Controller...");
+                                    controller.disconnect_async().await.unwrap();
+                                    controller.stop_async().await.unwrap();
+                                    true
+                                }
+                            }
                         }
-                        Err(_) => {
-                            println!("CSI Collection Concluded. Stopping Controller...");
+                        None => {
+                            let _ = run_loop.await;
+                            println!("CSI Collection Stopped. Attempting to Restart...");
+                            false
+                        }
+                    };
+
+                    START_COLLECTION.reset();
+                    if should_stop {
+                        if controller.is_started().unwrap_or(false) {
                             controller.disconnect_async().await.unwrap();
                             controller.stop_async().await.unwrap();
-                            START_COLLECTION.reset();
-                            // START_TRAFFIC_GEN.reset();
                         }
+                        break;
                     }
                 }
-                _ => {}
-            }
-            if !matches!(controller.is_started(), Ok(true)) {
-                // Set WiFi controller configuration only if not Sniffer mode
-                if !matches!(wifi_mode, WiFiMode::Sniffer) {
-                    // Get the controller configuration
-                    let config = CONTROLLER_CONFIG.lock(|c| c.borrow().as_ref().unwrap().clone());
-                    // Set the controller configuration
-                    match controller.set_configuration(&config) {
-                        Ok(_) => {
-                            println!("WiFi Configuration Set: {:?}", config);
-                        }
-                        Err(_) => {
-                            println!("WiFi Configuration Error");
-                            // For Debug only
-                            println!("Error Config: {:?}", config);
-                        }
-                    }
-                }
-                // Start WiFi
-                println!("Starting WiFi");
-                controller.start_async().await.unwrap();
-                println!("Wifi Started!");
-
-                // Check if Station mode is configured to establish a connection
-                if matches!(wifi_mode, WiFiMode::Station | WiFiMode::AccessPointStation) {
-                    // Connect WiFi
-                    // Try to connect to the network up to 4 times
-                    for attempt in 1..=3 {
-                        println!("Connecting (attempt {}/{})...", attempt, 3);
-                        match controller.connect_async().await {
-                            Ok(_) => {
-                                println!("Connected!");
-                                break;
+                _ => {
+                    if !matches!(wifi_mode, WiFiMode::Sniffer) {
+                        let config =
+                            CONTROLLER_CONFIG.lock(|c| c.borrow().as_ref().unwrap().clone());
+                        match controller.set_configuration(&config) {
+                            Ok(_) => println!("WiFi Configuration Set: {:?}", config),
+                            Err(_) => {
+                                println!("WiFi Configuration Error");
+                                println!("Error Config: {:?}", config);
                             }
-                            Err(e) => {
-                                println!("Connection attempt {} failed: {:?}", attempt, e);
-                                if attempt < 3 {
-                                    println!("Trying again...");
-                                    Timer::after(Duration::from_millis(3000)).await;
-                                } else {
-                                    println!("All connection attempts failed. Giving up.");
+                        }
+                    }
+
+                    println!("Starting WiFi");
+                    controller.start_async().await.unwrap();
+                    println!("Wifi Started!");
+
+                    if matches!(wifi_mode, WiFiMode::Station | WiFiMode::AccessPointStation) {
+                        for attempt in 1..=3 {
+                            println!("Connecting (attempt {}/{})...", attempt, 3);
+                            match controller.connect_async().await {
+                                Ok(_) => {
+                                    println!("Connected!");
+                                    break;
+                                }
+                                Err(e) => {
+                                    println!("Connection attempt {} failed: {:?}", attempt, e);
+                                    if attempt < 3 {
+                                        println!("Trying again...");
+                                        Timer::after(Duration::from_millis(3000)).await;
+                                    } else {
+                                        println!("All connection attempts failed.");
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                // Set the CSI Configuration and Connect Callback (should be passed to function)
-                let csi = build_csi_config(csi_config.clone());
-
-                // Create default for date time
-                let mut date_time = &DateTime {
-                    captured_at: Instant::now(),
-                    captured_millis: 0,
-                    captured_secs: 0,
-                };
-
-                // Retreive the time struct from global context if available
-                if DATE_TIME_VALID.load(core::sync::atomic::Ordering::Relaxed) {
-                    date_time = DATE_TIME.get().await;
-                }
-
-                if !matches!(
-                    wifi_mode,
-                    WiFiMode::AccessPoint | WiFiMode::AccessPointStation
-                ) {
-                    // CSI callback should calculate the time elapsed using Instant now and getting new time
-                    controller
-                        .set_csi(csi, |info: esp_wifi::wifi::wifi_csi_info_t| {
-                            let csi_data = info.buf;
-                            let csi_data_len = info.len;
-                            let mac = info.mac;
-                            let rx_ctrl = info.rx_ctrl;
-                            let rssi = if rx_ctrl.rssi() > 127 {
-                                rx_ctrl.rssi() - 256
-                            } else {
-                                rx_ctrl.rssi()
-                            };
-
-                            // 612 is the maximum possible amount of data bytes that can be recieved
-                            // https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-guides/wifi.html#wi-fi-channel-state-information
-
-                            let mut data_buffer: Vec<i8, 612> = Vec::new();
-                            for data in 0..csi_data_len {
-                                unsafe {
-                                    let value = *csi_data.add(data as usize);
-                                    data_buffer.push(value).expect("Exceeded maximum capacity");
-                                }
-                            }
-
-                            // CSI Received Packet Radio Metadata Header Value Interpretations for non-ESP32-C6 devices
-
-                            // rssi: Received Signal Strength Indicator(RSSI) of packet. unit: dBm.
-                            // rate: PHY rate encoding of the packet. Only valid for non HT(11bg) packet.
-                            // sig_mode: Protocol of the received packet, 0: non HT(11bg) packet; 1: HT(11n) packet; 3: VHT(11ac) packet.
-                            // mcs: Modulation Coding Scheme. If is HT(11n) packet, shows the modulation, range from 0 to 76(MSC0 ~ MCS76).
-                            // cwb: Channel Bandwidth of the packet. 0: 20MHz; 1: 40MHz.
-                            // smoothing: Set to 1 indicates that channel estimate smoothing is recommended. Set to 0 indicates that only per-carrier independent (unsmoothed) channel estimate is recommended.
-                            // not_sounding: Set to 0 indicates that PPDU is a sounding PPDU. Set to 1 indicates that the PPDU is not a sounding PPDU. Sounding PPDU is used for channel estimation by the request receiver.
-                            // aggregation: Aggregation. 0: MPDU packet; 1: AMPDU packet
-                            // stbc: Space Time Block Code(STBC). 0: non STBC packet; 1: STBC packet.
-                            // fec_coding: Forward Error Correction (FEC). Flag is set for 11n packets which are LDPC.
-                            // sgi: Short Guide Interval (SGI). 0: Long GI; 1: Short GI.
-                            // noise_floor: noise floor of Radio Frequency Module(RF). unit: dBm.
-                            // ampdu_cnt: The number of subframes aggregated in AMPDU.
-                            // channel: Primary channel on which this packet is received.
-                            // secondary_channel: Secondary channel on which this packet is received. 0: none; 1: above; 2: below.
-                            // timestamp: Timestamp. The local time when this packet is received. It is precise only if modem sleep or light sleep is not enabled. The timer is started when controller.start() is returned. unit: microsecond.
-                            // noise_floor: Noise floor of Radio Frequency Module(RF). unit: dBm.
-                            // ant: Antenna number from which this packet is received. 0: WiFi antenna 0; 1: WiFi antenna 1.
-                            // noise_floor: Noise floor of Radio Frequency Module(RF). unit: dBm.
-                            // sig_len: Length of packet including Frame Check Sequence(FCS).
-                            // rx_state: State of the packet. 0: no error; others: error numbers which are not public.
-
-                            // CSI Received Packet Radio Metadata Header Value Interpretations for ESP32-C6 devices
-
-                            // rssi: Received Signal Strength Indicator (RSSI) of the packet, in dBm.
-                            // rate: PHY rate encoding of the packet. Only valid for non-HT (802.11b/g) packets.
-                            // sig_len: Length of the received packet including the Frame Check Sequence (FCS).
-                            // rx_state: Reception state of the packet: 0 for no error, others indicate error codes.
-                            // dump_len: Length of the dump buffer.
-                            // he_sigb_len: Length of HE-SIG-B field (802.11ax).
-                            // cur_single_mpdu: Indicates if this is a single MPDU.
-                            // cur_bb_format: Current baseband format.
-                            // rx_channel_estimate_info_vld: Channel estimation validity.
-                            // rx_channel_estimate_len: Length of the channel estimation.
-                            // second: Timing information in seconds.
-                            // channel: Primary channel on which the packet is received.
-                            // noise_floor: Noise floor of the Radio Frequency module, in dBm.
-                            // is_group: Indicates if this is a group-addressed frame.
-                            // rxend_state: End state of the packet reception.
-                            // rxmatch3: Indicate whether the reception frame is from interface 3.
-                            // rxmatch2: Indicate whether the reception frame is from interface 2.
-                            // rxmatch1: Indicate whether the reception frame is from interface 1.
-                            // rxmatch0: Indicate whether the reception frame is from interface 0.
-
-                            println!("New CSI Data");
-
-                            // Calculate Elapsed time here and add offset to date_time then call to calculate new time
-                            // This code should activate only if architechture supports capturing NTP
-                            if DATE_TIME_VALID.load(core::sync::atomic::Ordering::Relaxed) {
-                                let elapsed_time =
-                                    Instant::now().duration_since(date_time.captured_at);
-
-                                // Add seconds and adjust for overflow from milliseconds
-                                let total_time_secs =
-                                    date_time.captured_secs + elapsed_time.as_secs();
-
-                                // Add milliseconds and adjust if they exceed 1000
-                                let total_millis =
-                                    date_time.captured_millis + elapsed_time.as_millis();
-                                let extra_secs = total_millis / 1000; // 1000ms = 1 second
-                                let final_millis = total_millis % 1000; // Remainder in milliseconds
-
-                                // Add extra seconds from milliseconds overflow to total seconds
-                                let total_time_secs = total_time_secs + extra_secs;
-
-                                // Now call the date-time conversion function
-                                let (year, month, day, hour, minute, second, millis) =
-                                    unix_to_date_time(total_time_secs, final_millis);
-
-                                println!(
-                                    "Recieved at {:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
-                                    year, month, day, hour, minute, second, millis
-                                );
-                            }
-                            println!(
-                                "mac: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-                                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
-                            );
-                            println!("rssi: {}", rssi);
-                            print_csi_metadata(info);
-                            println!("data length: {}", csi_data_len);
-                            println!("csi raw data:");
-                            #[cfg(feature = "defmt")]
-                            println!("{=[?]}", data_buffer);
-                            #[cfg(feature = "println")]
-                            println!("{:?}", data_buffer);
-                        })
-                        .unwrap();
-
-                    println!("Waiting for CSI data...");
+                    if matches!(
+                        net_arch,
+                        NetworkArchitechture::RouterStation
+                            | NetworkArchitechture::RouterAccessPointStation
+                    ) {
+                        while !DATE_TIME_VALID.load(core::sync::atomic::Ordering::Relaxed) {
+                            println!("Waiting for valid NTP time...");
+                            Timer::after(Duration::from_millis(500)).await;
+                        }
+                    }
                 }
             }
         }
@@ -868,6 +827,10 @@ async fn sta_stack_task(
     traffic_type: TrafficType,
 ) {
     println!("STA Stack Task Running");
+    // Subscribe to the CSI channel
+    let mut csi_subscriber = CSI_CHANNEL
+        .subscriber()
+        .expect("Failed to create CSI channel subscriber");
 
     // Acquire and store IP information for gateway and client after configuration is up
 
@@ -884,6 +847,9 @@ async fn sta_stack_task(
     println!("Acquiring config...");
     sta_stack.wait_config_up().await;
     println!("Config Acquired");
+
+    // Signal that DHCP is complete
+    DHCP_COMPLETE.signal(());
 
     // Print out acquired IP configuration
     loop {
@@ -950,107 +916,104 @@ async fn sta_stack_task(
             println!("NTP time not captured. Configured architechture does not support.");
         }
     }
+    // ------------------ UDP Socket Setup ------------------
+    let mut udp_rx_buffer = [0; 1024];
+    let mut udp_tx_buffer = [0; 1024];
+    let mut udp_rx_meta: [PacketMetadata; 128] = [PacketMetadata::EMPTY; 128];
+    let mut udp_tx_meta: [PacketMetadata; 128] = [PacketMetadata::EMPTY; 128];
+
+    let mut socket = UdpSocket::new(
+        sta_stack,
+        &mut udp_rx_meta,
+        &mut udp_rx_buffer,
+        &mut udp_tx_meta,
+        &mut udp_tx_buffer,
+    );
+
+    println!("Binding");
+
+    // Bind to a local port
+    socket.bind(10987).unwrap();
+
+    // Send to some unreachable port to trigger response
+    // Using same as local port number
+    let endpoint = IpEndpoint::new(embassy_net::IpAddress::Ipv4(ip_info.gateway_address), 10987);
+
+    // ------------------ ICMP Socket Setup ------------------
+    let mut rx_buffer = [0; 64];
+    let mut tx_buffer = [0; 64];
+    let mut rx_meta: [RawPacketMetadata; 1] = [RawPacketMetadata::EMPTY; 1];
+    let mut tx_meta: [RawPacketMetadata; 1] = [RawPacketMetadata::EMPTY; 1];
+
+    let raw_socket = RawSocket::new::<WifiDevice<'_>>(
+        sta_stack,
+        IpVersion::Ipv4,
+        IpProtocol::Icmp,
+        &mut rx_meta,
+        &mut rx_buffer,
+        &mut tx_meta,
+        &mut tx_buffer,
+    );
+
+    // Buffer to hold ICMP Packet
+    let mut icmp_buffer = [0u8; 12];
+
+    // Create ICMP Packet
+    let mut icmp_packet = Icmpv4Packet::new_unchecked(&mut icmp_buffer[..]);
+
+    // Create an ICMPv4 Echo Request
+    let icmp_repr = Icmpv4Repr::EchoRequest {
+        ident: 0x22b,
+        seq_no: 0,
+        data: &[0xDE, 0xAD, 0xBE, 0xEF],
+    };
+
+    // Serialize the ICMP representation into the packet
+    icmp_repr.emit(&mut icmp_packet, &ChecksumCapabilities::default());
+
+    // Buffer for the full IPv4 packet
+    let mut ipv4_buffer = [0u8; 64];
+
+    // Define the IPv4 representation
+    let ipv4_repr = Ipv4Repr {
+        src_addr: ip_info.local_address.address(), // Replace with your source IP
+        dst_addr: ip_info.gateway_address,
+        payload_len: icmp_repr.buffer_len(),
+        hop_limit: 64, // Time-to-live value
+        next_header: IpProtocol::Icmp,
+    };
+
+    // Create the IPv4 packet
+    let mut ipv4_packet = Ipv4Packet::new_unchecked(&mut ipv4_buffer);
+
+    // Serialize the IPv4 representation into the packet
+    ipv4_repr.emit(&mut ipv4_packet, &ChecksumCapabilities::default());
+
+    // Copy the ICMP packet into the IPv4 packet's payload
+    ipv4_packet
+        .payload_mut()
+        .copy_from_slice(icmp_packet.into_inner());
+
+    // IP Packet buffer that will be sent
+    let ipv4_packet_buffer = ipv4_packet.into_inner();
 
     // Check if traffic generation is enabled
+    // If not enabled, then we assume that CSI data is not required at the Station
+    // Instead will respond to any recieved traffic by echoing CSI data back to sender over UDP
     if traffic_en {
         println!("Starting Traffic Generation");
         // Match type of traffic
         match traffic_type {
             TrafficType::UDP => {
-                let mut rx_buffer = [0; 1024];
-                let mut tx_buffer = [0; 1024];
-                let mut rx_meta: [PacketMetadata; 128] = [PacketMetadata::EMPTY; 128];
-                let mut tx_meta: [PacketMetadata; 128] = [PacketMetadata::EMPTY; 128];
-
-                let mut socket = UdpSocket::new(
-                    sta_stack,
-                    &mut rx_meta,
-                    &mut rx_buffer,
-                    &mut tx_meta,
-                    &mut tx_buffer,
-                );
-
-                println!("Binding");
-
-                // Bind to a local port
-                socket.bind(10987).unwrap();
-
-                // Send to some unreachable port to trigger response
-                // Using same local port number
-                let endpoint =
-                    IpEndpoint::new(embassy_net::IpAddress::Ipv4(ip_info.gateway_address), 10987);
-
                 loop {
                     // Send a random byte to gateway
+                    println!("PING!");
                     socket.send_to(&[13], endpoint).await.unwrap();
                     // Wait for user specified duration
                     Timer::after(Duration::from_millis(traffic_interval)).await;
-                    println!("PING!");
                 }
             }
             TrafficType::ICMPPing => {
-                // To Implement when raw becomes available in embassy-net
-                // Create a raw packet and ping gateway IP
-
-                let mut rx_buffer = [0; 64];
-                let mut tx_buffer = [0; 64];
-                let mut rx_meta: [RawPacketMetadata; 1] = [RawPacketMetadata::EMPTY; 1];
-                let mut tx_meta: [RawPacketMetadata; 1] = [RawPacketMetadata::EMPTY; 1];
-
-                let raw_socket = RawSocket::new::<WifiDevice<'_>>(
-                    sta_stack,
-                    IpVersion::Ipv4,
-                    IpProtocol::Icmp,
-                    &mut rx_meta,
-                    &mut rx_buffer,
-                    &mut tx_meta,
-                    &mut tx_buffer,
-                );
-
-                // Buffer to hold ICMP Packet
-                let mut icmp_buffer = [0u8; 12];
-
-                // Create ICMP Packet
-                let mut icmp_packet = Icmpv4Packet::new_unchecked(&mut icmp_buffer[..]);
-
-                // Create an ICMPv4 Echo Request
-                let icmp_repr = Icmpv4Repr::EchoRequest {
-                    ident: 0x22b,
-                    seq_no: 0,
-                    data: &[0xDE, 0xAD, 0xBE, 0xEF],
-                };
-
-                // Serialize the ICMP representation into the packet
-                icmp_repr.emit(&mut icmp_packet, &ChecksumCapabilities::default());
-
-                // Buffer for the full IPv4 packet
-                let mut ipv4_buffer = [0u8; 64];
-
-                // Define the IPv4 representation
-                let ipv4_repr = Ipv4Repr {
-                    src_addr: ip_info.local_address.address(), // Replace with your source IP
-                    dst_addr: ip_info.gateway_address,
-                    payload_len: icmp_repr.buffer_len(),
-                    hop_limit: 64, // Time-to-live value
-                    next_header: IpProtocol::Icmp,
-                };
-
-                println!("Creating IPv4 Packet");
-
-                // Create the IPv4 packet
-                let mut ipv4_packet = Ipv4Packet::new_unchecked(&mut ipv4_buffer);
-
-                // Serialize the IPv4 representation into the packet
-                ipv4_repr.emit(&mut ipv4_packet, &ChecksumCapabilities::default());
-
-                // Copy the ICMP packet into the IPv4 packet's payload
-                ipv4_packet
-                    .payload_mut()
-                    .copy_from_slice(icmp_packet.into_inner());
-
-                // IP Packet buffer that will be sent
-                let ipv4_packet_buffer = ipv4_packet.into_inner();
-
                 loop {
                     // Send raw packet
                     raw_socket.send(ipv4_packet_buffer).await;
@@ -1059,6 +1022,14 @@ async fn sta_stack_task(
                     Timer::after(Duration::from_millis(traffic_interval)).await;
                 }
             }
+        }
+    } else {
+        loop {
+            // Await any new CSI data
+            let message = csi_subscriber.next_message_pure().await;
+            let message_u8: Vec<u8, 612> = message.into_iter().map(|x| x as u8).collect();
+            // Send back CSI to sender
+            socket.send_to(&message_u8, endpoint).await.unwrap();
         }
     }
 }
@@ -1249,6 +1220,107 @@ fn days_in_month(year: u64, month: u64) -> u64 {
         12 => 31,
         _ => 0,
     }
+}
+
+fn print_csi(
+    info: esp_wifi::wifi::wifi_csi_info_t,
+    date_time: DateTime,
+    data_buffer: Vec<i8, 612>,
+    csi_data_len: u16,
+) {
+    let mac = info.mac;
+    let rx_ctrl = info.rx_ctrl;
+    let rssi = if rx_ctrl.rssi() > 127 {
+        rx_ctrl.rssi() - 256
+    } else {
+        rx_ctrl.rssi()
+    };
+
+    // CSI Received Packet Radio Metadata Header Value Interpretations for non-ESP32-C6 devices
+
+    // rssi: Received Signal Strength Indicator(RSSI) of packet. unit: dBm.
+    // rate: PHY rate encoding of the packet. Only valid for non HT(11bg) packet.
+    // sig_mode: Protocol of the received packet, 0: non HT(11bg) packet; 1: HT(11n) packet; 3: VHT(11ac) packet.
+    // mcs: Modulation Coding Scheme. If is HT(11n) packet, shows the modulation, range from 0 to 76(MSC0 ~ MCS76).
+    // cwb: Channel Bandwidth of the packet. 0: 20MHz; 1: 40MHz.
+    // smoothing: Set to 1 indicates that channel estimate smoothing is recommended. Set to 0 indicates that only per-carrier independent (unsmoothed) channel estimate is recommended.
+    // not_sounding: Set to 0 indicates that PPDU is a sounding PPDU. Set to 1 indicates that the PPDU is not a sounding PPDU. Sounding PPDU is used for channel estimation by the request receiver.
+    // aggregation: Aggregation. 0: MPDU packet; 1: AMPDU packet
+    // stbc: Space Time Block Code(STBC). 0: non STBC packet; 1: STBC packet.
+    // fec_coding: Forward Error Correction (FEC). Flag is set for 11n packets which are LDPC.
+    // sgi: Short Guide Interval (SGI). 0: Long GI; 1: Short GI.
+    // noise_floor: noise floor of Radio Frequency Module(RF). unit: dBm.
+    // ampdu_cnt: The number of subframes aggregated in AMPDU.
+    // channel: Primary channel on which this packet is received.
+    // secondary_channel: Secondary channel on which this packet is received. 0: none; 1: above; 2: below.
+    // timestamp: Timestamp. The local time when this packet is received. It is precise only if modem sleep or light sleep is not enabled. The timer is started when controller.start() is returned. unit: microsecond.
+    // noise_floor: Noise floor of Radio Frequency Module(RF). unit: dBm.
+    // ant: Antenna number from which this packet is received. 0: WiFi antenna 0; 1: WiFi antenna 1.
+    // noise_floor: Noise floor of Radio Frequency Module(RF). unit: dBm.
+    // sig_len: Length of packet including Frame Check Sequence(FCS).
+    // rx_state: State of the packet. 0: no error; others: error numbers which are not public.
+
+    // CSI Received Packet Radio Metadata Header Value Interpretations for ESP32-C6 devices
+
+    // rssi: Received Signal Strength Indicator (RSSI) of the packet, in dBm.
+    // rate: PHY rate encoding of the packet. Only valid for non-HT (802.11b/g) packets.
+    // sig_len: Length of the received packet including the Frame Check Sequence (FCS).
+    // rx_state: Reception state of the packet: 0 for no error, others indicate error codes.
+    // dump_len: Length of the dump buffer.
+    // he_sigb_len: Length of HE-SIG-B field (802.11ax).
+    // cur_single_mpdu: Indicates if this is a single MPDU.
+    // cur_bb_format: Current baseband format.
+    // rx_channel_estimate_info_vld: Channel estimation validity.
+    // rx_channel_estimate_len: Length of the channel estimation.
+    // second: Timing information in seconds.
+    // channel: Primary channel on which the packet is received.
+    // noise_floor: Noise floor of the Radio Frequency module, in dBm.
+    // is_group: Indicates if this is a group-addressed frame.
+    // rxend_state: End state of the packet reception.
+    // rxmatch3: Indicate whether the reception frame is from interface 3.
+    // rxmatch2: Indicate whether the reception frame is from interface 2.
+    // rxmatch1: Indicate whether the reception frame is from interface 1.
+    // rxmatch0: Indicate whether the reception frame is from interface 0.
+
+    println!("New CSI Data");
+
+    // Calculate Elapsed time here and add offset to date_time then call to calculate new time
+    // This code should activate only if architechture supports capturing NTP
+    if DATE_TIME_VALID.load(core::sync::atomic::Ordering::Relaxed) {
+        let elapsed_time = Instant::now().duration_since(date_time.captured_at);
+
+        // Add seconds and adjust for overflow from milliseconds
+        let total_time_secs = date_time.captured_secs + elapsed_time.as_secs();
+
+        // Add milliseconds and adjust if they exceed 1000
+        let total_millis = date_time.captured_millis + elapsed_time.as_millis();
+        let extra_secs = total_millis / 1000; // 1000ms = 1 second
+        let final_millis = total_millis % 1000; // Remainder in milliseconds
+
+        // Add extra seconds from milliseconds overflow to total seconds
+        let total_time_secs = total_time_secs + extra_secs;
+
+        // Now call the date-time conversion function
+        let (year, month, day, hour, minute, second, millis) =
+            unix_to_date_time(total_time_secs, final_millis);
+
+        println!(
+            "Recieved at {:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+            year, month, day, hour, minute, second, millis
+        );
+    }
+    println!(
+        "mac: {:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+        mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
+    );
+    println!("rssi: {}", rssi);
+    print_csi_metadata(info);
+    println!("data length: {}", csi_data_len);
+    println!("csi raw data:");
+    #[cfg(feature = "defmt")]
+    println!("{=[?]}", data_buffer);
+    #[cfg(feature = "println")]
+    println!("{:?}", data_buffer);
 }
 
 #[cfg(feature = "esp32c6")]
