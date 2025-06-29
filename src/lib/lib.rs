@@ -85,7 +85,7 @@
 #![no_std]
 
 use core::cell::RefCell;
-use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use embassy_executor::Spawner;
 use embassy_sync::pubsub::{PubSubBehavior, PubSubChannel, Subscriber};
 use embassy_time::{with_timeout, Duration, Instant, Timer};
@@ -98,6 +98,7 @@ use esp_println::println;
 #[cfg(feature = "defmt")]
 use defmt::println;
 
+use esp_wifi::wifi::Interfaces;
 use smoltcp::phy::ChecksumCapabilities;
 use smoltcp::wire::{Icmpv4Packet, Icmpv4Repr, Ipv4Packet, Ipv4Repr};
 
@@ -108,13 +109,9 @@ use embassy_net::{
 };
 use esp_alloc as _;
 use esp_backtrace as _;
-use esp_hal::peripherals::WIFI;
-use esp_wifi::{
-    wifi::{
-        AccessPointConfiguration, ClientConfiguration, Configuration, CsiConfig, WifiController,
-        WifiDevice, WifiEvent, WifiState,
-    },
-    EspWifiController,
+use esp_wifi::wifi::{
+    AccessPointConfiguration, ClientConfiguration, Configuration, CsiConfig, WifiController,
+    WifiDevice, WifiEvent, WifiState,
 };
 
 use enumset::enum_set;
@@ -161,6 +158,7 @@ static OPERATION_MODE: Mutex<CriticalSectionRawMutex, RefCell<WiFiMode>> =
     Mutex::new(RefCell::new(WiFiMode::Sniffer));
 static CSI_CHANNEL: PubSubChannel<CriticalSectionRawMutex, Vec<i8, 612>, 1, 2, 1> =
     PubSubChannel::new();
+static CSI_TIMESTAMP: AtomicU32 = AtomicU32::new(0);
 static DHCP_COMPLETE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 // Date Time Struct
@@ -292,9 +290,9 @@ impl CSICollector {
 
                 // Access Point Configuration
                 let ap_config = Configuration::AccessPoint(AccessPointConfiguration {
-                    ssid: ap_ssid.try_into().unwrap(),
+                    ssid: ap_ssid.as_str().try_into().unwrap(),
                     auth_method: esp_wifi::wifi::AuthMethod::WPA2Personal,
-                    password: ap_password.try_into().unwrap(),
+                    password: ap_password.as_str().try_into().unwrap(),
                     max_connections: max_connections,
                     channel: channel,
                     ssid_hidden: hide_ssid,
@@ -319,16 +317,16 @@ impl CSICollector {
                 // AP/STA Configuration
                 let config = Configuration::Mixed(
                     ClientConfiguration {
-                        ssid: ssid.try_into().unwrap(),
-                        password: password.try_into().unwrap(),
+                        ssid: ssid.as_str().try_into().unwrap(),
+                        password: password.as_str().try_into().unwrap(),
                         channel: Some(self.wifi_config.channel),
                         auth_method: esp_wifi::wifi::AuthMethod::WPA2Personal,
                         ..Default::default()
                     },
                     AccessPointConfiguration {
-                        ssid: ap_ssid.try_into().unwrap(),
+                        ssid: ap_ssid.as_str().try_into().unwrap(),
                         auth_method: esp_wifi::wifi::AuthMethod::WPA2Personal,
-                        password: ap_password.try_into().unwrap(),
+                        password: ap_password.as_str().try_into().unwrap(),
                         max_connections: max_connections,
                         channel: channel,
                         ssid_hidden: hide_ssid,
@@ -346,8 +344,8 @@ impl CSICollector {
 
                 // Station Configuration
                 let config = Configuration::Client(ClientConfiguration {
-                    ssid: ssid.try_into().unwrap(),
-                    password: password.try_into().unwrap(),
+                    ssid: ssid.as_str().try_into().unwrap(),
+                    password: password.as_str().try_into().unwrap(),
                     channel: Some(self.wifi_config.channel),
                     auth_method: esp_wifi::wifi::AuthMethod::WPA2Personal,
                     ..Default::default()
@@ -402,22 +400,25 @@ impl CSICollector {
     /// The `EspWifiController` is also retuned in case it is needed for other purposes Ex. Bluetooth.
     pub fn init(
         &self,
-        wifi: WIFI,
-        wifi_hw: &'static EspWifiController<'static>,
+        // wifi: WIFI,
+        // wifi_hw: &'static EspWifiController<'static>,
+        controller: WifiController<'static>,
+        interface: Interfaces<'static>,
         seed: u64,
         spawner: &Spawner,
-    ) -> Result<&'static EspWifiController<'static>> {
+    ) -> Result<()> {
+        // ) -> Result<&'static EspWifiController<'static>> {
         // Validate configuration
         self.validate()?;
         println!("Configuration Validated");
 
-        let init = wifi_hw;
+        // let init = wifi_hw;
 
         // Instantiate Network Stack
         match self.op_mode {
             WiFiMode::AccessPoint => {
                 // Create WiFi Interface and Controller Instances
-                let (controller, wifi_interface) = esp_wifi::wifi::new(init, wifi).unwrap();
+                // let (controller, wifi_interface) = esp_wifi::wifi::new(init, wifi).unwrap();
 
                 // Create gateway IP address instance
                 // This config doesnt get an IP address from router but runs DHCP server
@@ -434,9 +435,10 @@ impl CSICollector {
 
                 // Create Network Stack
                 let (ap_stack, ap_runner) = embassy_net::new(
-                    wifi_interface.ap,
+                    interface.ap,
+                    // wifi_interface.ap,
                     ap_ip_config,
-                    mk_static!(StackResources<3>, StackResources::<3>::new()),
+                    mk_static!(StackResources<6>, StackResources::<6>::new()),
                     seed,
                 );
 
@@ -452,16 +454,17 @@ impl CSICollector {
             // Station Mode
             WiFiMode::Station => {
                 // Create WiFi Interface and Controller Instances
-                let (controller, wifi_interface) = esp_wifi::wifi::new(&init, wifi).unwrap();
+                // let (controller, wifi_interface) = esp_wifi::wifi::new(&init, wifi).unwrap();
 
                 // Configure Station DHCP Client
                 let sta_config = embassy_net::Config::dhcpv4(Default::default());
 
                 // Create Network Stack
                 let (sta_stack, sta_runner) = embassy_net::new(
-                    wifi_interface.sta,
+                    // wifi_interface.sta,
+                    interface.sta,
                     sta_config,
-                    mk_static!(StackResources<3>, StackResources::<3>::new()),
+                    mk_static!(StackResources<6>, StackResources::<6>::new()),
                     seed,
                 );
 
@@ -485,7 +488,7 @@ impl CSICollector {
                 // Gets IP address from router and also runs DHCP server
 
                 // Create AP/STA Interface
-                let (controller, wifi_interface) = esp_wifi::wifi::new(&init, wifi).unwrap();
+                // let (controller, wifi_interface) = esp_wifi::wifi::new(&init, wifi).unwrap();
 
                 // IP Configuration
 
@@ -507,15 +510,17 @@ impl CSICollector {
 
                 // Init network stacks
                 let (ap_stack, ap_runner) = embassy_net::new(
-                    wifi_interface.ap,
+                    interface.ap,
+                    // wifi_interface.ap,
                     ap_ip_config,
                     mk_static!(StackResources<3>, StackResources::<3>::new()),
                     seed,
                 );
                 let (sta_stack, sta_runner) = embassy_net::new(
-                    wifi_interface.sta,
+                    // wifi_interface.sta,
+                    interface.sta,
                     sta_ip_config,
-                    mk_static!(StackResources<3>, StackResources::<3>::new()),
+                    mk_static!(StackResources<6>, StackResources::<6>::new()),
                     seed,
                 );
 
@@ -540,18 +545,22 @@ impl CSICollector {
             WiFiMode::Sniffer => {
                 println!("Starting Sniffer");
                 // Create controller instance
-                let (controller, _) = esp_wifi::wifi::new(&init, wifi).unwrap();
+                // let (controller, interfaces) = esp_wifi::wifi::new(&init, wifi).unwrap();
                 // Take sniffer
-                let sniffer = controller.take_sniffer().unwrap();
+                let sniffer = interface.sniffer;
                 sniffer.set_promiscuous_mode(true).unwrap();
 
-                // Spawn controller to start sniffing
+                // Spawn controller to start sniffing and initiate CSI callback
+                // todo!("Sniffer needs to be passed to connection task since its no longer part of controller");
+                // Do we really need to pass the sniffer instance?
+                // There isn't any code that requires the sniffer instance in the connection task
+                // Addtionally, CSI related callbacks are part of the controller instance
                 spawner
                     .spawn(connection(controller, self.mac_filter, self.print_csi))
                     .ok();
             }
         }
-        Ok(init)
+        Ok(())
     }
 
     /// Validates the CSI Collection configuration/profile
@@ -617,168 +626,228 @@ async fn connection(
 
         // Inner loop to handle WiFi state
         loop {
-            match esp_wifi::wifi::wifi_state() {
-                WifiState::ApStarted | WifiState::StaConnected => {
-                    // For Station or AP+Station modes, ensure DHCP is complete before enabling CSI
-                    if matches!(wifi_mode, WiFiMode::Station | WiFiMode::AccessPointStation) {
-                        println!("Waiting for DHCP to complete...");
-                        match with_timeout(Duration::from_secs(30), DHCP_COMPLETE.wait()).await {
-                            Ok(()) => println!("DHCP complete, enabling CSI collection."),
-                            Err(_) => {
-                                println!("DHCP timed out, skipping CSI collection.");
-                                START_COLLECTION.reset();
-                                break;
+            if matches!(wifi_mode, WiFiMode::Sniffer) {
+                let csi = build_csi_config(csi_config.clone());
+                println!("Enabling CSI collection");
+                controller
+                    .set_csi(csi, |info: esp_wifi::wifi::wifi_csi_info_t| {
+                        let csi_data = info.buf;
+                        let csi_data_len = info.len;
+                        let mut data_buffer: Vec<i8, 612> = Vec::new();
+                        for data in 0..csi_data_len {
+                            unsafe {
+                                let value = *csi_data.add(data as usize);
+                                data_buffer.push(value).expect("Exceeded maximum capacity");
                             }
                         }
-                    }
-
-                    // Set CSI configuration only when collection is explicitly started
-                    if !matches!(
-                        wifi_mode,
-                        WiFiMode::AccessPoint | WiFiMode::AccessPointStation
-                    ) {
-                        let csi = build_csi_config(csi_config.clone());
-                        let date_time =
-                            if DATE_TIME_VALID.load(core::sync::atomic::Ordering::Relaxed) {
-                                DATE_TIME.get().await
-                            } else {
-                                &DateTime {
-                                    captured_at: Instant::now(),
-                                    captured_millis: 0,
-                                    captured_secs: 0,
-                                }
-                            };
-
-                        println!("Enabling CSI collection");
-                        controller
-                            .set_csi(csi, |info: esp_wifi::wifi::wifi_csi_info_t| {
-                                let csi_data = info.buf;
-                                let csi_data_len = info.len;
-                                let mut data_buffer: Vec<i8, 612> = Vec::new();
-                                for data in 0..csi_data_len {
-                                    unsafe {
-                                        let value = *csi_data.add(data as usize);
-                                        data_buffer.push(value).expect("Exceeded maximum capacity");
-                                    }
-                                }
-                                if mac_filter.is_some() && info.mac != mac_filter.unwrap() {
-                                    return;
-                                }
-                                CSI_CHANNEL.publish_immediate(data_buffer.clone());
-                                if print_csi_en {
-                                    print_csi(info, date_time.clone(), data_buffer, csi_data_len);
-                                }
-                            })
-                            .unwrap();
-                    }
-
-                    let run_loop = async {
-                        loop {
-                            let mut event = controller.wait_for_events(ap_events, true).await;
-                            if event.contains(WifiEvent::ApStaconnected) {
-                                println!("New STA Connected");
-                            }
-                            if event.contains(WifiEvent::ApStadisconnected) {
-                                println!("STA Disconnected");
-                            }
-                            if event.contains(WifiEvent::ApStop) {
-                                println!("AP connection stopped. Collection halted.");
-                                Timer::after(Duration::from_millis(5000)).await;
-                                return Ok::<(), ()>(());
-                            }
-                            if event.contains(WifiEvent::StaDisconnected) {
-                                println!("STA disconnected");
-                                Timer::after(Duration::from_millis(5000)).await;
-                                return Ok(());
-                            }
-                            if event.contains(WifiEvent::StaStop) {
-                                println!("STA connection stopped. Collection halted.");
-                                Timer::after(Duration::from_millis(5000)).await;
-                                return Ok(());
-                            }
-                            event.clear();
+                        if mac_filter.is_some() && info.mac != mac_filter.unwrap() {
+                            return;
                         }
-                    };
+                        CSI_CHANNEL.publish_immediate(data_buffer.clone());
+                        // Sniffer has no option but to print CSI data
+                        // Sniffer does not have an active connection to a router or AP
 
-                    let should_stop = match run_duration_secs {
-                        Some(duration) => {
-                            let conn_res =
-                                with_timeout(Duration::from_secs(duration), run_loop).await;
-                            match conn_res {
-                                Ok(_) => {
-                                    println!("CSI Collection Concluded. Stopping Controller...");
-                                    true
-                                }
-                                Err(_) => {
-                                    println!("CSI Collection Timed Out. Stopping Controller...");
-                                    controller.disconnect_async().await.unwrap();
-                                    controller.stop_async().await.unwrap();
-                                    true
-                                }
-                            }
-                        }
-                        None => {
-                            let _ = run_loop.await;
-                            println!("CSI Collection Stopped. Attempting to Restart...");
-                            false
-                        }
-                    };
+                        // if print_csi_en {
+                        // For sniffer date_time data does not matter
+                        let date_time = &DateTime {
+                            captured_at: Instant::now(),
+                            captured_millis: 0,
+                            captured_secs: 0,
+                        };
+                        print_csi(info, date_time.clone(), data_buffer, csi_data_len);
+                        // }
+                    })
+                    .unwrap();
 
+                // Wait for duration or until stopped
+                if let Some(duration) = run_duration_secs {
+                    Timer::after(Duration::from_secs(duration)).await;
+                    println!("CSI Collection Concluded");
                     START_COLLECTION.reset();
-                    if should_stop {
-                        if controller.is_started().unwrap_or(false) {
-                            controller.disconnect_async().await.unwrap();
-                            controller.stop_async().await.unwrap();
-                        }
-                        break;
-                    }
+                    break;
                 }
-                _ => {
-                    if !matches!(wifi_mode, WiFiMode::Sniffer) {
-                        let config =
-                            CONTROLLER_CONFIG.lock(|c| c.borrow().as_ref().unwrap().clone());
-                        match controller.set_configuration(&config) {
-                            Ok(_) => println!("WiFi Configuration Set: {:?}", config),
-                            Err(_) => {
-                                println!("WiFi Configuration Error");
-                                println!("Error Config: {:?}", config);
-                            }
-                        }
-                    }
 
-                    println!("Starting WiFi");
-                    controller.start_async().await.unwrap();
-                    println!("Wifi Started!");
-
-                    if matches!(wifi_mode, WiFiMode::Station | WiFiMode::AccessPointStation) {
-                        for attempt in 1..=3 {
-                            println!("Connecting (attempt {}/{})...", attempt, 3);
-                            match controller.connect_async().await {
-                                Ok(_) => {
-                                    println!("Connected!");
+                loop {
+                    Timer::after(Duration::from_secs(1)).await;
+                }
+            } else {
+                match esp_wifi::wifi::wifi_state() {
+                    WifiState::ApStarted | WifiState::StaConnected => {
+                        // For Station or AP+Station modes, ensure DHCP is complete before enabling CSI
+                        if matches!(wifi_mode, WiFiMode::Station | WiFiMode::AccessPointStation) {
+                            println!("Waiting for DHCP to complete...");
+                            match with_timeout(Duration::from_secs(30), DHCP_COMPLETE.wait()).await
+                            {
+                                Ok(()) => println!("DHCP complete, enabling CSI collection."),
+                                Err(_) => {
+                                    println!("DHCP timed out, skipping CSI collection.");
+                                    START_COLLECTION.reset();
                                     break;
                                 }
-                                Err(e) => {
-                                    println!("Connection attempt {} failed: {:?}", attempt, e);
-                                    if attempt < 3 {
-                                        println!("Trying again...");
-                                        Timer::after(Duration::from_millis(3000)).await;
-                                    } else {
-                                        println!("All connection attempts failed.");
+                            }
+                        }
+
+                        // Set CSI configuration only when collection is explicitly started
+                        if !matches!(
+                            wifi_mode,
+                            WiFiMode::AccessPoint | WiFiMode::AccessPointStation
+                        ) {
+                            let csi = build_csi_config(csi_config.clone());
+                            let date_time =
+                                if DATE_TIME_VALID.load(core::sync::atomic::Ordering::Relaxed) {
+                                    DATE_TIME.get().await
+                                } else {
+                                    &DateTime {
+                                        captured_at: Instant::now(),
+                                        captured_millis: 0,
+                                        captured_secs: 0,
+                                    }
+                                };
+
+                            println!("Enabling CSI collection");
+                            controller
+                                .set_csi(csi, |info: esp_wifi::wifi::wifi_csi_info_t| {
+                                    let csi_data = info.buf;
+                                    let csi_data_len = info.len;
+                                    let csi_timestamp = info.rx_ctrl.timestamp();
+                                    CSI_TIMESTAMP.store(csi_timestamp, Ordering::Relaxed);
+                                    let mut data_buffer: Vec<i8, 612> = Vec::new();
+                                    for data in 0..csi_data_len {
+                                        unsafe {
+                                            let value = *csi_data.add(data as usize);
+                                            data_buffer
+                                                .push(value)
+                                                .expect("Exceeded maximum capacity");
+                                        }
+                                    }
+                                    if mac_filter.is_some() && info.mac != mac_filter.unwrap() {
+                                        return;
+                                    }
+                                    CSI_CHANNEL.publish_immediate(data_buffer.clone());
+                                    if print_csi_en {
+                                        print_csi(
+                                            info,
+                                            date_time.clone(),
+                                            data_buffer,
+                                            csi_data_len,
+                                        );
+                                    }
+                                })
+                                .unwrap();
+                        }
+
+                        let run_loop = async {
+                            loop {
+                                let mut event = controller.wait_for_events(ap_events, true).await;
+                                if event.contains(WifiEvent::ApStaconnected) {
+                                    println!("New STA Connected");
+                                }
+                                if event.contains(WifiEvent::ApStadisconnected) {
+                                    println!("STA Disconnected");
+                                }
+                                if event.contains(WifiEvent::ApStop) {
+                                    println!("AP connection stopped. Collection halted.");
+                                    Timer::after(Duration::from_millis(5000)).await;
+                                    return Ok::<(), ()>(());
+                                }
+                                if event.contains(WifiEvent::StaDisconnected) {
+                                    println!("STA disconnected");
+                                    Timer::after(Duration::from_millis(5000)).await;
+                                    return Ok(());
+                                }
+                                if event.contains(WifiEvent::StaStop) {
+                                    println!("STA connection stopped. Collection halted.");
+                                    Timer::after(Duration::from_millis(5000)).await;
+                                    return Ok(());
+                                }
+                                event.clear();
+                            }
+                        };
+
+                        let should_stop = match run_duration_secs {
+                            Some(duration) => {
+                                let conn_res =
+                                    with_timeout(Duration::from_secs(duration), run_loop).await;
+                                match conn_res {
+                                    Ok(_) => {
+                                        println!(
+                                            "CSI Collection Concluded. Stopping Controller..."
+                                        );
+                                        true
+                                    }
+                                    Err(_) => {
+                                        println!(
+                                            "CSI Collection Timed Out. Stopping Controller..."
+                                        );
+                                        controller.disconnect_async().await.unwrap();
+                                        controller.stop_async().await.unwrap();
+                                        true
+                                    }
+                                }
+                            }
+                            None => {
+                                let _ = run_loop.await;
+                                println!("CSI Collection Stopped. Attempting to Restart...");
+                                false
+                            }
+                        };
+
+                        START_COLLECTION.reset();
+                        if should_stop {
+                            if controller.is_started().unwrap_or(false) {
+                                controller.disconnect_async().await.unwrap();
+                                controller.stop_async().await.unwrap();
+                            }
+                            break;
+                        }
+                    }
+                    _ => {
+                        if !matches!(wifi_mode, WiFiMode::Sniffer) {
+                            let config =
+                                CONTROLLER_CONFIG.lock(|c| c.borrow().as_ref().unwrap().clone());
+                            match controller.set_configuration(&config) {
+                                Ok(_) => println!("WiFi Configuration Set: {:?}", config),
+                                Err(_) => {
+                                    println!("WiFi Configuration Error");
+                                    println!("Error Config: {:?}", config);
+                                }
+                            }
+                        }
+
+                        println!("Starting WiFi");
+                        controller.start_async().await.unwrap();
+                        println!("Wifi Started!");
+
+                        if matches!(wifi_mode, WiFiMode::Station | WiFiMode::AccessPointStation) {
+                            for attempt in 1..=3 {
+                                println!("Connecting (attempt {}/{})...", attempt, 3);
+                                match controller.connect_async().await {
+                                    Ok(_) => {
+                                        println!("Connected!");
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        println!("Connection attempt {} failed: {:?}", attempt, e);
+                                        if attempt < 3 {
+                                            println!("Trying again...");
+                                            Timer::after(Duration::from_millis(3000)).await;
+                                        } else {
+                                            println!("All connection attempts failed.");
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
 
-                    if matches!(
-                        net_arch,
-                        NetworkArchitechture::RouterStation
-                            | NetworkArchitechture::RouterAccessPointStation
-                    ) {
-                        while !DATE_TIME_VALID.load(core::sync::atomic::Ordering::Relaxed) {
-                            println!("Waiting for valid NTP time...");
-                            Timer::after(Duration::from_millis(500)).await;
+                        if matches!(
+                            net_arch,
+                            NetworkArchitechture::RouterStation
+                                | NetworkArchitechture::RouterAccessPointStation
+                        ) {
+                            while !DATE_TIME_VALID.load(core::sync::atomic::Ordering::Relaxed) {
+                                println!("Waiting for valid NTP time...");
+                                Timer::after(Duration::from_millis(500)).await;
+                            }
                         }
                     }
                 }
@@ -786,37 +855,6 @@ async fn connection(
         }
     }
 }
-
-// Placeholder for future use if an AP stack is required to process packets
-// #[embassy_executor::task]
-// async fn ap_stack_task(ap_stack: Stack<'static>) {
-//     let mut rx_buffer = [0; 1024];
-//     let mut tx_buffer = [0; 1024];
-//     let mut rx_meta: [PacketMetadata; 128] = [PacketMetadata::EMPTY; 128];
-//     let mut tx_meta: [PacketMetadata; 128] = [PacketMetadata::EMPTY; 128];
-
-//     let mut socket = UdpSocket::new(
-//         ap_stack,
-//         &mut rx_meta,
-//         &mut rx_buffer,
-//         &mut tx_meta,
-//         &mut tx_buffer,
-//     );
-
-//     println!("Binding");
-
-//     socket.bind(10987).unwrap();
-
-//     let mut buf = [0u8; 512];
-
-//     loop {
-//         // Wait to receive a packet
-//         let (n, sender_endpoint) = socket.recv_from(&mut buf).await.unwrap();
-
-//         println!("Received {} bytes from {:?}", n, sender_endpoint);
-//         println!("Received array: {:?}", buf);
-//     }
-// }
 
 #[embassy_executor::task]
 async fn sta_stack_task(
@@ -919,8 +957,8 @@ async fn sta_stack_task(
     // ------------------ UDP Socket Setup ------------------
     let mut udp_rx_buffer = [0; 1024];
     let mut udp_tx_buffer = [0; 1024];
-    let mut udp_rx_meta: [PacketMetadata; 128] = [PacketMetadata::EMPTY; 128];
-    let mut udp_tx_meta: [PacketMetadata; 128] = [PacketMetadata::EMPTY; 128];
+    let mut udp_rx_meta: [PacketMetadata; 8] = [PacketMetadata::EMPTY; 8];
+    let mut udp_tx_meta: [PacketMetadata; 8] = [PacketMetadata::EMPTY; 8];
 
     let mut socket = UdpSocket::new(
         sta_stack,
@@ -1007,7 +1045,7 @@ async fn sta_stack_task(
             TrafficType::UDP => {
                 loop {
                     // Send a random byte to gateway
-                    println!("PING!");
+                    println!("Pinging Gateway");
                     socket.send_to(&[13], endpoint).await.unwrap();
                     // Wait for user specified duration
                     Timer::after(Duration::from_millis(traffic_interval)).await;
@@ -1026,8 +1064,23 @@ async fn sta_stack_task(
     } else {
         loop {
             // Await any new CSI data
+            let csi_timestamp = CSI_TIMESTAMP.load(core::sync::atomic::Ordering::Relaxed);
+            // Convert timestamp to bytes (big-endian)
+            let timestamp_bytes = csi_timestamp.to_be_bytes();
+            // Get the CSI data
             let message = csi_subscriber.next_message_pure().await;
-            let message_u8: Vec<u8, 612> = message.into_iter().map(|x| x as u8).collect();
+
+            // Create a message buffer for timestamp and CSI data
+            let mut message_u8: Vec<u8, 616> = Vec::new();
+
+            // Append the timestamp bytes to the message
+            message_u8.extend_from_slice(&timestamp_bytes).unwrap();
+
+            // Append the CSI data to the message
+            for x in message.iter() {
+                message_u8.push(*x as u8).unwrap();
+            }
+
             // Send back CSI to sender
             socket.send_to(&message_u8, endpoint).await.unwrap();
         }

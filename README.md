@@ -1,4 +1,4 @@
-# esp_csi_rs
+# esp csi rs
 
 A Rust crate for collecting **Channel State Information (CSI)** on **ESP32** series devices using the `no-std` embedded framework.
 

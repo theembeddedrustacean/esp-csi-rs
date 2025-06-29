@@ -67,6 +67,9 @@ async fn main(spawner: Spawner) {
         init(timer, rng, radio_clk,).unwrap()
     );
 
+    // Instantiate WiFi controller and interfaces
+    let (controller, interfaces) = esp_wifi::wifi::new(&init, wifi).unwrap();
+
     // Obtain a random seed value
     let seed = rng.random() as u64;
 
@@ -79,24 +82,26 @@ async fn main(spawner: Spawner) {
     // Network Architechture is AccessPointStation (no NTP time collection)
     let csi_collector = CSICollector::new(
         WiFiConfig {
-            ssid: "Connected Motion ".try_into().unwrap(),
-            password: "automotion@123".try_into().unwrap(),
+            ssid: "SSID".try_into().unwrap(),
+            password: "PASSWORD".try_into().unwrap(),
             ..Default::default()
         },
         esp_csi_rs::WiFiMode::Station,
         CSIConfig::default(),
         TrafficConfig {
             traffic_type: TrafficType::ICMPPing,
-            traffic_interval_ms: 500,
+            traffic_interval_ms: 1000,
         },
         true,
-        NetworkArchitechture::AccessPointStation,
+        NetworkArchitechture::RouterStation,
         None,
         false,
     );
 
     // Initalize CSI collector
-    csi_collector.init(wifi, init, seed, &spawner).unwrap();
+    csi_collector
+        .init(controller, interfaces, seed, &spawner)
+        .unwrap();
 
     // Collect CSI for 5 seconds
     // let reciever = csi_collector.start(Some(5));

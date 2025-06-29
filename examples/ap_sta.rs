@@ -27,15 +27,15 @@
 #![no_std]
 #![no_main]
 
-use defmt::println;
 use embassy_executor::Spawner;
 use esp_csi_rs::{
-    config::{CSIConfig, TrafficConfig, TrafficType, WiFiConfig},
+    config::{CSIConfig, TrafficConfig, WiFiConfig},
     CSICollector, NetworkArchitechture,
 };
 use esp_hal::rng::Rng;
 use esp_hal::timer::timg::TimerGroup;
 use esp_println as _;
+use esp_println::println;
 use esp_wifi::{init, EspWifiController};
 
 extern crate alloc;
@@ -76,6 +76,9 @@ async fn main(spawner: Spawner) {
         init(timer, rng, radio_clk,).unwrap()
     );
 
+    // Instantiate WiFi controller and interfaces
+    let (controller, interfaces) = esp_wifi::wifi::new(&init, wifi).unwrap();
+
     // Obtain a random seed value
     let seed = rng.random() as u64;
 
@@ -101,13 +104,17 @@ async fn main(spawner: Spawner) {
         TrafficConfig::default(),
         false,
         NetworkArchitechture::RouterAccessPointStation,
+        None,
+        false,
     );
 
     // Initalize CSI collector
-    csi_collector.init(wifi, init, seed, &spawner).unwrap();
+    csi_collector
+        .init(controller, interfaces, seed, &spawner)
+        .unwrap();
 
     // Collect CSI for 10 seconds
-    csi_collector.start(10).await;
+    csi_collector.start(Some(10));
 
     loop {}
 }

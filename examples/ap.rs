@@ -69,6 +69,9 @@ async fn main(spawner: Spawner) {
         init(timer, rng, radio_clk,).unwrap()
     );
 
+    // Instantiate WiFi controller and interfaces
+    let (controller, interfaces) = esp_wifi::wifi::new(&init, wifi).unwrap();
+
     // Obtain a random seed value
     let seed = rng.random() as u64;
 
@@ -91,13 +94,17 @@ async fn main(spawner: Spawner) {
         TrafficConfig::default(),
         false,
         NetworkArchitechture::AccessPointStation,
+        None,
+        false,
     );
 
     // Initalize CSI collector
-    csi_collector.init(wifi, init, seed, &spawner).unwrap();
+    csi_collector
+        .init(controller, interfaces, seed, &spawner)
+        .unwrap();
 
     // Collect CSI for 10 seconds
-    csi_collector.start(5000).await;
+    csi_collector.start(Some(5000));
 
     loop {}
 }
