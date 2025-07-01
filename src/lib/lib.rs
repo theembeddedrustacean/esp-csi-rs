@@ -85,7 +85,7 @@
 #![no_std]
 
 use core::cell::RefCell;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::AtomicBool;
 use embassy_executor::Spawner;
 use embassy_sync::pubsub::{PubSubBehavior, PubSubChannel, Subscriber};
 use embassy_time::{with_timeout, Duration, Instant, Timer};
@@ -156,9 +156,8 @@ static COLLECTION_CONFIG: Mutex<CriticalSectionRawMutex, RefCell<Option<CSIConfi
     Mutex::new(RefCell::new(None));
 static OPERATION_MODE: Mutex<CriticalSectionRawMutex, RefCell<WiFiMode>> =
     Mutex::new(RefCell::new(WiFiMode::Sniffer));
-static CSI_CHANNEL: PubSubChannel<CriticalSectionRawMutex, Vec<i8, 612>, 1, 2, 1> =
+static CSI_CHANNEL: PubSubChannel<CriticalSectionRawMutex, Vec<i8, 616>, 1, 2, 1> =
     PubSubChannel::new();
-static CSI_TIMESTAMP: AtomicU32 = AtomicU32::new(0);
 static DHCP_COMPLETE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 // Date Time Struct
@@ -266,7 +265,7 @@ impl CSICollector {
     pub fn start(
         &self,
         collection_time_secs: Option<u64>,
-    ) -> Subscriber<'static, CriticalSectionRawMutex, Vec<i8, 612>, 1, 2, 1> {
+    ) -> Subscriber<'static, CriticalSectionRawMutex, Vec<i8, 616>, 1, 2, 1> {
         // In this method everytime the collection starts, the new configurations are loaded and propagated to global context.
         // All settings can be copied from new configuration and loaded to global, without needing to initalize again.
         // Initialization should be restriced to setting up hardware an spawning the network tasks.
@@ -633,7 +632,14 @@ async fn connection(
                     .set_csi(csi, |info: esp_wifi::wifi::wifi_csi_info_t| {
                         let csi_data = info.buf;
                         let csi_data_len = info.len;
-                        let mut data_buffer: Vec<i8, 612> = Vec::new();
+                        let csi_timestamp = info.rx_ctrl.timestamp();
+                        let timestamp_bytes = csi_timestamp.to_be_bytes();
+                        let mut data_buffer: Vec<i8, 616> = Vec::new();
+                        data_buffer
+                            .extend_from_slice(&timestamp_bytes.map(|b| b as i8))
+                            .unwrap();
+                        // Start adding CSI data
+                        // The first 4 bytes are the timestamp, so we start from index 4
                         for data in 0..csi_data_len {
                             unsafe {
                                 let value = *csi_data.add(data as usize);
@@ -644,18 +650,17 @@ async fn connection(
                             return;
                         }
                         CSI_CHANNEL.publish_immediate(data_buffer.clone());
-                        // Sniffer has no option but to print CSI data
-                        // Sniffer does not have an active connection to a router or AP
 
-                        // if print_csi_en {
                         // For sniffer date_time data does not matter
                         let date_time = &DateTime {
                             captured_at: Instant::now(),
                             captured_millis: 0,
                             captured_secs: 0,
                         };
+
+                        // Sniffer has no option but to print CSI data
+                        // Sniffer does not have an active connection to a router or AP
                         print_csi(info, date_time.clone(), data_buffer, csi_data_len);
-                        // }
                     })
                     .unwrap();
 
@@ -710,9 +715,14 @@ async fn connection(
                                     let csi_data = info.buf;
                                     let csi_data_len = info.len;
                                     let csi_timestamp = info.rx_ctrl.timestamp();
-                                    CSI_TIMESTAMP.store(csi_timestamp, Ordering::Relaxed);
-                                    let mut data_buffer: Vec<i8, 612> = Vec::new();
-                                    for data in 0..csi_data_len {
+                                    let timestamp_bytes = csi_timestamp.to_be_bytes();
+                                    let mut data_buffer: Vec<i8, 616> = Vec::new();
+                                    data_buffer
+                                        .extend_from_slice(&timestamp_bytes.map(|b| b as i8))
+                                        .unwrap();
+                                    // Start adding CSI data
+                                    // The first 4 bytes are the timestamp, so we start from index 4
+                                    for data in 4..csi_data_len {
                                         unsafe {
                                             let value = *csi_data.add(data as usize);
                                             data_buffer
@@ -1064,17 +1074,10 @@ async fn sta_stack_task(
     } else {
         loop {
             // Await any new CSI data
-            let csi_timestamp = CSI_TIMESTAMP.load(core::sync::atomic::Ordering::Relaxed);
-            // Convert timestamp to bytes (big-endian)
-            let timestamp_bytes = csi_timestamp.to_be_bytes();
-            // Get the CSI data
             let message = csi_subscriber.next_message_pure().await;
 
             // Create a message buffer for timestamp and CSI data
             let mut message_u8: Vec<u8, 616> = Vec::new();
-
-            // Append the timestamp bytes to the message
-            message_u8.extend_from_slice(&timestamp_bytes).unwrap();
 
             // Append the CSI data to the message
             for x in message.iter() {
@@ -1278,7 +1281,7 @@ fn days_in_month(year: u64, month: u64) -> u64 {
 fn print_csi(
     info: esp_wifi::wifi::wifi_csi_info_t,
     date_time: DateTime,
-    data_buffer: Vec<i8, 612>,
+    data_buffer: Vec<i8, 616>,
     csi_data_len: u16,
 ) {
     let mac = info.mac;

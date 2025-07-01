@@ -119,7 +119,7 @@ async fn main(spawner: Spawner) {
 
 #[embassy_executor::task]
 async fn csi_task(
-    mut csi_buffer: Subscriber<'static, CriticalSectionRawMutex, Vec<i8, 612>, 1, 2, 1>,
+    mut csi_buffer: Subscriber<'static, CriticalSectionRawMutex, Vec<i8, 616>, 1, 2, 1>,
 ) {
     loop {
         // Wait for CSI data to be received
