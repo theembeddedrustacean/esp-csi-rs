@@ -16,6 +16,7 @@
 use embassy_executor::Spawner;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, pubsub::Subscriber};
 use embassy_time::{Duration, Timer};
+use esp_bootloader_esp_idf::esp_app_desc;
 use esp_csi_rs::{
     config::{CSIConfig, TrafficConfig, TrafficType, WiFiConfig},
     CSICollector, NetworkArchitechture,
@@ -26,6 +27,8 @@ use esp_println as _;
 use esp_println::println;
 use esp_wifi::{init, EspWifiController};
 use heapless::Vec;
+
+esp_app_desc!();
 
 extern crate alloc;
 
@@ -82,20 +85,20 @@ async fn main(spawner: Spawner) {
     // Network Architechture is AccessPointStation (no NTP time collection)
     let csi_collector = CSICollector::new(
         WiFiConfig {
-            ssid: "SSID".try_into().unwrap(),
-            password: "PASSWORD".try_into().unwrap(),
+            ssid: "esp".try_into().unwrap(),
+            password: "12345678".try_into().unwrap(),
             ..Default::default()
         },
         esp_csi_rs::WiFiMode::Station,
         CSIConfig::default(),
         TrafficConfig {
-            traffic_type: TrafficType::ICMPPing,
+            traffic_type: TrafficType::UDP,
             traffic_interval_ms: 1000,
         },
-        true,
-        NetworkArchitechture::RouterStation,
-        None,
         false,
+        NetworkArchitechture::AccessPointStation,
+        None,
+        true,
     );
 
     // Initalize CSI collector
@@ -109,7 +112,7 @@ async fn main(spawner: Spawner) {
     let csi = csi_collector.start(None);
 
     // Optionally spawn a task to process incoming CSI data
-    // collector returns a Subscriber type with a buffer of 612 bytes, Capacity of 1, 2 subscribers, and 2 publishers
+    // collector returns a Subscriber type with a buffer of 612 bytes, Capacity of 4, 2 subscribers, and 1 publisher
     spawner.spawn(csi_task(csi)).ok();
 
     loop {
@@ -119,12 +122,12 @@ async fn main(spawner: Spawner) {
 
 #[embassy_executor::task]
 async fn csi_task(
-    mut csi_buffer: Subscriber<'static, CriticalSectionRawMutex, Vec<i8, 616>, 1, 2, 1>,
+    mut csi_buffer: Subscriber<'static, CriticalSectionRawMutex, Vec<i8, 616>, 4, 2, 1>,
 ) {
     loop {
         // Wait for CSI data to be received
         let csi_data = csi_buffer.next_message().await;
         // Print the CSI data
-        println!("CSI Data printed from Task: {:?}", csi_data);
+        // println!("CSI Data printed from Task: {:?}", csi_data);
     }
 }

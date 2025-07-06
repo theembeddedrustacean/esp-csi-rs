@@ -10,6 +10,7 @@
 
 use embassy_executor::Spawner;
 use embassy_time::{Duration, Timer};
+use esp_bootloader_esp_idf::esp_app_desc;
 use esp_csi_rs::{
     config::{CSIConfig, TrafficConfig, WiFiConfig},
     CSICollector, NetworkArchitechture,
@@ -19,6 +20,8 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_println as _;
 use esp_println::println;
 use esp_wifi::{init, EspWifiController};
+
+esp_app_desc!();
 
 extern crate alloc;
 

@@ -21,6 +21,8 @@
 #![no_main]
 
 use embassy_executor::Spawner;
+use embassy_time::{Duration, Timer};
+use esp_bootloader_esp_idf::esp_app_desc;
 use esp_csi_rs::{
     config::{CSIConfig, TrafficConfig, WiFiConfig},
     CSICollector, NetworkArchitechture,
@@ -30,6 +32,8 @@ use esp_hal::timer::timg::TimerGroup;
 use esp_println as _;
 use esp_println::println;
 use esp_wifi::{init, EspWifiController};
+
+esp_app_desc!();
 
 extern crate alloc;
 
@@ -85,7 +89,7 @@ async fn main(spawner: Spawner) {
         WiFiConfig {
             ap_ssid: "esp".try_into().unwrap(),
             ap_password: "12345678".try_into().unwrap(),
-            max_connections: 1,
+            max_connections: 2,
             ssid_hidden: false,
             ..Default::default()
         },
@@ -103,8 +107,13 @@ async fn main(spawner: Spawner) {
         .init(controller, interfaces, seed, &spawner)
         .unwrap();
 
-    // Collect CSI for 10 seconds
-    csi_collector.start(Some(5000));
+    // Start Collecting CSI data
+    // In access point mode, defining a duration does not matter. This is because there isnt any collection happening.
+    // The Access point only runs to support stations connecting to it.
+    csi_collector.start(None);
 
-    loop {}
+    loop {
+        // Yeild to other tasks
+        Timer::after(Duration::from_secs(1)).await
+    }
 }

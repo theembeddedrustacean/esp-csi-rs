@@ -105,6 +105,7 @@ esp32s3 = [
 
 [dependencies]
 # Core dependencies
+esp-bootloader-esp-idf = "0.1.0"
 esp-backtrace = { version = "0.16.0", optional = false, features = [
     "exception-handler",
     "panic-handler",

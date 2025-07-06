@@ -93,6 +93,8 @@ use embassy_time::{with_timeout, Duration, Instant, Timer};
 #[cfg(feature = "println")]
 use esp_println as _;
 #[cfg(feature = "println")]
+use esp_println::print;
+#[cfg(feature = "println")]
 use esp_println::println;
 
 #[cfg(feature = "defmt")]
@@ -156,7 +158,7 @@ static COLLECTION_CONFIG: Mutex<CriticalSectionRawMutex, RefCell<Option<CSIConfi
     Mutex::new(RefCell::new(None));
 static OPERATION_MODE: Mutex<CriticalSectionRawMutex, RefCell<WiFiMode>> =
     Mutex::new(RefCell::new(WiFiMode::Sniffer));
-static CSI_CHANNEL: PubSubChannel<CriticalSectionRawMutex, Vec<i8, 616>, 1, 2, 1> =
+static CSI_CHANNEL: PubSubChannel<CriticalSectionRawMutex, Vec<i8, 616>, 4, 2, 1> =
     PubSubChannel::new();
 static DHCP_COMPLETE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
@@ -265,7 +267,7 @@ impl CSICollector {
     pub fn start(
         &self,
         collection_time_secs: Option<u64>,
-    ) -> Subscriber<'static, CriticalSectionRawMutex, Vec<i8, 616>, 1, 2, 1> {
+    ) -> Subscriber<'static, CriticalSectionRawMutex, Vec<i8, 616>, 4, 2, 1> {
         // In this method everytime the collection starts, the new configurations are loaded and propagated to global context.
         // All settings can be copied from new configuration and loaded to global, without needing to initalize again.
         // Initialization should be restriced to setting up hardware an spawning the network tasks.
@@ -543,17 +545,11 @@ impl CSICollector {
             // Sniffer Mode
             WiFiMode::Sniffer => {
                 println!("Starting Sniffer");
-                // Create controller instance
-                // let (controller, interfaces) = esp_wifi::wifi::new(&init, wifi).unwrap();
-                // Take sniffer
+                // Create sniffer instance
                 let sniffer = interface.sniffer;
                 sniffer.set_promiscuous_mode(true).unwrap();
 
                 // Spawn controller to start sniffing and initiate CSI callback
-                // todo!("Sniffer needs to be passed to connection task since its no longer part of controller");
-                // Do we really need to pass the sniffer instance?
-                // There isn't any code that requires the sniffer instance in the connection task
-                // Addtionally, CSI related callbacks are part of the controller instance
                 spawner
                     .spawn(connection(controller, self.mac_filter, self.print_csi))
                     .ok();
@@ -638,17 +634,20 @@ async fn connection(
                         data_buffer
                             .extend_from_slice(&timestamp_bytes.map(|b| b as i8))
                             .unwrap();
+
                         // Start adding CSI data
                         // The first 4 bytes are the timestamp, so we start from index 4
-                        for data in 0..csi_data_len {
+                        for data in 4..csi_data_len + 4 {
                             unsafe {
                                 let value = *csi_data.add(data as usize);
                                 data_buffer.push(value).expect("Exceeded maximum capacity");
                             }
                         }
+
                         if mac_filter.is_some() && info.mac != mac_filter.unwrap() {
                             return;
                         }
+
                         CSI_CHANNEL.publish_immediate(data_buffer.clone());
 
                         // For sniffer date_time data does not matter
@@ -720,9 +719,8 @@ async fn connection(
                                     data_buffer
                                         .extend_from_slice(&timestamp_bytes.map(|b| b as i8))
                                         .unwrap();
-                                    // Start adding CSI data
-                                    // The first 4 bytes are the timestamp, so we start from index 4
-                                    for data in 4..csi_data_len {
+
+                                    for data in 4..csi_data_len + 4 {
                                         unsafe {
                                             let value = *csi_data.add(data as usize);
                                             data_buffer
@@ -733,6 +731,7 @@ async fn connection(
                                     if mac_filter.is_some() && info.mac != mac_filter.unwrap() {
                                         return;
                                     }
+
                                     CSI_CHANNEL.publish_immediate(data_buffer.clone());
                                     if print_csi_en {
                                         print_csi(
@@ -848,16 +847,29 @@ async fn connection(
                                 }
                             }
                         }
-
                         if matches!(
                             net_arch,
                             NetworkArchitechture::RouterStation
                                 | NetworkArchitechture::RouterAccessPointStation
                         ) {
+                            let mut first_print = true;
                             while !DATE_TIME_VALID.load(core::sync::atomic::Ordering::Relaxed) {
-                                println!("Waiting for valid NTP time...");
+                                if first_print {
+                                    println!("Waiting for valid NTP time...");
+                                    first_print = false;
+                                } else {
+                                    print!(".");
+                                }
                                 Timer::after(Duration::from_millis(500)).await;
                             }
+                            if !first_print {
+                                println!();
+                            }
+                        } else {
+                            println!(
+                                "NTP time not supported for network architecture: {:?}",
+                                net_arch
+                            );
                         }
                     }
                 }
@@ -865,6 +877,38 @@ async fn connection(
         }
     }
 }
+
+// Placeholder for future use if an AP stack is required to process packets
+// #[embassy_executor::task]
+// async fn ap_stack_task(ap_stack: Stack<'static>) {
+//     let mut rx_buffer = [0; 1024];
+//     let mut tx_buffer = [0; 1024];
+//     let mut rx_meta: [PacketMetadata; 128] = [PacketMetadata::EMPTY; 128];
+//     let mut tx_meta: [PacketMetadata; 128] = [PacketMetadata::EMPTY; 128];
+
+//     let mut socket = UdpSocket::new(
+//         ap_stack,
+//         &mut rx_meta,
+//         &mut rx_buffer,
+//         &mut tx_meta,
+//         &mut tx_buffer,
+//     );
+
+//     println!("Binding");
+
+//     socket.bind(10987).unwrap();
+
+//     let mut buf = [0u8; 512];
+
+//     loop {
+//         // Wait to receive a packet
+//         let (n, sender_endpoint) = socket.recv_from(&mut buf).await.unwrap();
+
+//         println!("Received {} bytes from {:?}", n, sender_endpoint);
+//         println!("Received array: {:?}", buf);
+//         buf.fill(0);
+//     }
+// }
 
 #[embassy_executor::task]
 async fn sta_stack_task(
