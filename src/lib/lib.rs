@@ -98,6 +98,8 @@ use esp_println::print;
 use esp_println::println;
 
 #[cfg(feature = "defmt")]
+use defmt::info;
+#[cfg(feature = "defmt")]
 use defmt::println;
 
 use esp_wifi::wifi::Interfaces;
@@ -858,18 +860,24 @@ async fn connection(
                                     println!("Waiting for valid NTP time...");
                                     first_print = false;
                                 } else {
-                                    print!(".");
+                                    #[cfg(not(feature = "defmt"))]
+                                    {
+                                        print!(".");
+                                    }
                                 }
                                 Timer::after(Duration::from_millis(500)).await;
                             }
                             if !first_print {
-                                println!();
+                                println!("");
                             }
                         } else {
-                            println!(
-                                "NTP time not supported for network architecture: {:?}",
-                                net_arch
-                            );
+                            #[cfg(not(feature = "defmt"))]
+                            {
+                                println!(
+                                    "NTP time not supported for network architecture: {:?}",
+                                    net_arch
+                                );
+                            }
                         }
                     }
                 }
@@ -948,8 +956,19 @@ async fn sta_stack_task(
         if let Some(config) = sta_stack.config_v4() {
             ip_info.local_address = config.address;
             ip_info.gateway_address = config.gateway.unwrap();
-            println!("Got IP: {:?}", ip_info.local_address);
-            println!("Gateway IP: {:?}", ip_info.gateway_address);
+
+            #[cfg(feature = "defmt")]
+            {
+                info!("Local IP: {:?}", ip_info.local_address);
+                info!("Gateway IP: {:?}", ip_info.gateway_address);
+            }
+
+            #[cfg(not(feature = "defmt"))]
+            {
+                println!("Local IP: {:?}", ip_info.local_address);
+                println!("Gateway IP: {:?}", ip_info.gateway_address);
+            }
+
             break;
         }
         Timer::after(Duration::from_millis(500)).await;

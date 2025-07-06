@@ -81,7 +81,7 @@ async fn main(spawner: Spawner) {
     // Create a CSI collector configuration
     // Device configured as a Station
     // Traffic is enabled with UDP packets
-    // Traffic (UDP packets) is generated every 500 milli seconds
+    // Traffic (UDP packets) is generated every 1000 milliseconds
     // Network Architechture is AccessPointStation (no NTP time collection)
     let csi_collector = CSICollector::new(
         WiFiConfig {
@@ -95,10 +95,10 @@ async fn main(spawner: Spawner) {
             traffic_type: TrafficType::UDP,
             traffic_interval_ms: 1000,
         },
-        false,
+        true,
         NetworkArchitechture::AccessPointStation,
         None,
-        true,
+        false,
     );
 
     // Initalize CSI collector
@@ -128,6 +128,6 @@ async fn csi_task(
         // Wait for CSI data to be received
         let csi_data = csi_buffer.next_message().await;
         // Print the CSI data
-        // println!("CSI Data printed from Task: {:?}", csi_data);
+        println!("CSI Data printed from Task: {:?}", csi_data);
     }
 }
